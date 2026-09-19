@@ -59,6 +59,12 @@ function readResultCode(value: unknown) {
   return String((header as { resultCode?: unknown }).resultCode ?? "");
 }
 
+// Logs only the operation path, non-secret request params, and a short response
+// snippet -- never the serviceKey or the constructed URL (which embeds it).
+function logTagoFailure(path: string, params: Record<string, string>, detail: Record<string, unknown>) {
+  console.error("[tago]", JSON.stringify({ path, params, ...detail }).slice(0, 500));
+}
+
 async function fetchTago(serviceKey: string, path: string, params: Record<string, string>, attempt = 0): Promise<unknown> {
   const url = new URL(`${TAGO_BASE_URL}/${path}`);
   url.searchParams.set("serviceKey", normalizedServiceKey(serviceKey));
@@ -73,37 +79,55 @@ async function fetchTago(serviceKey: string, path: string, params: Record<string
     });
   } catch (error) {
     if (error instanceof Error && error.name === "TimeoutError") {
+      logTagoFailure(path, params, { stage: "fetch", reason: "timeout" });
       throw new TagoProviderError("TIMEOUT", "열차정보 응답이 지연되고 있습니다. 잠시 후 다시 시도해주세요.");
     }
     if(attempt===0 && error instanceof TypeError) return fetchTago(serviceKey,path,params,1);
+    logTagoFailure(path, params, { stage: "fetch", reason: error instanceof Error ? error.message : String(error) });
     throw new TagoProviderError("UPSTREAM", "공식 열차정보 서버에 연결하지 못했습니다.");
   }
 
   if (response.status === 429) {
+    logTagoFailure(path, params, { stage: "status", httpStatus: response.status });
     throw new TagoProviderError("RATE_LIMIT", "공식 열차정보 조회 한도를 잠시 초과했습니다.");
   }
   if (response.status === 401 || response.status === 403) {
+    logTagoFailure(path, params, { stage: "status", httpStatus: response.status });
     throw new TagoProviderError("AUTH", "열차정보 인증을 확인할 수 없습니다. 서비스 관리자에게 문의해주세요.");
   }
   if (!response.ok) {
+    const bodySnippet = await response.text().then((text) => text.slice(0, 300)).catch(() => "");
+    logTagoFailure(path, params, { stage: "status", httpStatus: response.status, statusText: response.statusText, bodySnippet });
     throw new TagoProviderError("UPSTREAM", "공식 열차정보 서버가 정상 응답하지 않았습니다.");
   }
 
   let payload: unknown;
+  let rawBody = "";
   try {
-    const body = await response.text();
-    if (/<(?:returnReasonCode|resultCode)>(?:20|30|31|32)<\//.test(body)) throw new TagoProviderError("AUTH", "열차정보 인증을 확인할 수 없습니다. 서비스 관리자에게 문의해주세요.");
-    if (/<(?:returnReasonCode|resultCode)>(?:22|23)<\//.test(body)) throw new TagoProviderError("RATE_LIMIT", "공식 열차정보 조회 한도를 초과했습니다. 잠시 후 다시 시도해주세요.");
-    payload = JSON.parse(body);
+    rawBody = await response.text();
+    if (/<(?:returnReasonCode|resultCode)>(?:20|30|31|32)<\//.test(rawBody)) {
+      logTagoFailure(path, params, { stage: "xml-error", bodySnippet: rawBody.slice(0, 300) });
+      throw new TagoProviderError("AUTH", "열차정보 인증을 확인할 수 없습니다. 서비스 관리자에게 문의해주세요.");
+    }
+    if (/<(?:returnReasonCode|resultCode)>(?:22|23)<\//.test(rawBody)) {
+      logTagoFailure(path, params, { stage: "xml-error", bodySnippet: rawBody.slice(0, 300) });
+      throw new TagoProviderError("RATE_LIMIT", "공식 열차정보 조회 한도를 초과했습니다. 잠시 후 다시 시도해주세요.");
+    }
+    payload = JSON.parse(rawBody);
   } catch(error) {
     if(error instanceof TagoProviderError) throw error;
     if(error instanceof Error && error.name === "TimeoutError") throw new TagoProviderError("TIMEOUT", "열차정보 응답이 지연되고 있습니다. 다시 시도해주세요.");
+    logTagoFailure(path, params, { stage: "parse", bodySnippet: rawBody.slice(0, 300) });
     throw new TagoProviderError("SCHEMA", "공식 열차정보 응답 형식을 확인할 수 없습니다.");
   }
 
   const resultCode = readResultCode(payload);
-  if (!resultCode) throw new TagoProviderError("SCHEMA", "열차정보 응답 형식을 확인할 수 없습니다.");
+  if (!resultCode) {
+    logTagoFailure(path, params, { stage: "resultCode", reason: "missing", bodySnippet: rawBody.slice(0, 300) });
+    throw new TagoProviderError("SCHEMA", "열차정보 응답 형식을 확인할 수 없습니다.");
+  }
   if (resultCode !== "00" && resultCode !== "0000") {
+    logTagoFailure(path, params, { stage: "resultCode", resultCode });
     if (["20", "30", "31"].includes(resultCode)) {
       throw new TagoProviderError("AUTH", "공공데이터 인증키를 확인해주세요.");
     }
