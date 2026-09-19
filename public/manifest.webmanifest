@@ -1,0 +1,14 @@
+{
+  "name": "RailFlow KTX 자동예약",
+  "short_name": "RailFlow",
+  "description": "KTX 열차 검색과 취소표 자동예약 관리",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#070707",
+  "theme_color": "#070707",
+  "orientation": "portrait-primary",
+  "icons": [
+    { "src": "/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any maskable" },
+    { "src": "/favicon.svg", "sizes": "64x64", "type": "image/svg+xml" }
+  ]
+}

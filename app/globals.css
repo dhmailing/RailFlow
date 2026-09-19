@@ -1,0 +1,148 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "../vendor/shadcn-tailwind-4.13.0.css";
+
+@utility scrollbar-thin {
+  scrollbar-width: thin;
+}
+
+@utility scrollbar-none {
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+:root {
+  --background: #070707;
+  --foreground: #f7f7f7;
+  --card: #111111;
+  --card-foreground: #f7f7f7;
+  --popover: #171717;
+  --popover-foreground: #f7f7f7;
+  --primary: #ff8a1f;
+  --primary-foreground: #090909;
+  --secondary: #1d1d1d;
+  --secondary-foreground: #f7f7f7;
+  --muted: #1c1c1c;
+  --muted-foreground: #929292;
+  --accent: #2a1a0d;
+  --accent-foreground: #ffbd7b;
+  --destructive: #ff5f57;
+  --border: #2b2b2b;
+  --input: #333333;
+  --ring: #ff8a1f;
+  --chart-1: #ff8a1f;
+  --chart-2: #34d399;
+  --chart-3: #60a5fa;
+  --chart-4: #fbbf24;
+  --chart-5: #fb7185;
+  --radius: 0.875rem;
+  --sidebar: #0d0d0d;
+  --sidebar-foreground: #f7f7f7;
+  --sidebar-primary: #ff8a1f;
+  --sidebar-primary-foreground: #090909;
+  --sidebar-accent: #1d1d1d;
+  --sidebar-accent-foreground: #f7f7f7;
+  --sidebar-border: #2b2b2b;
+  --sidebar-ring: #ff8a1f;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 6px);
+  --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  border-color: var(--border);
+}
+
+*::before, *::after { box-sizing: border-box; }
+body { word-break: keep-all; }
+main :is(.flex, .grid) > * { min-width: 0; }
+main :is(section, article, input, button, select) { max-width: 100%; }
+main input { width: 100%; min-width: 0; }
+main input[type="date"], main input[type="time"] { display:block; width:100%; min-height:32px; }
+img { max-width:100%; height:auto; object-fit:contain; }
+svg { flex-shrink:0; object-fit:contain; }
+main button:not([role="switch"]):not([data-slot="combobox-trigger"]):not([data-slot="input-group-button"]) { white-space:normal; height:auto; min-height:44px; }
+main article > .flex, main section > .flex { flex-wrap:wrap; }
+main article > .flex > div { flex:1 1 180px; }
+.station-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; }
+.swap-button { transform:rotate(90deg); }
+@media (min-width:640px) {
+  .station-grid { grid-template-columns:minmax(0,1fr) 44px minmax(0,1fr); }
+  .swap-button { transform:none; }
+}
+@media (max-width:479px) {
+  .date-grid { grid-template-columns:minmax(0,1fr); }
+  main header { padding-inline:12px; gap:8px; }
+  main article > .flex { gap:16px; }
+  main article > .flex > button, main article > .flex > a { width:100%; }
+}
+
+html {
+  background: var(--background);
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(255, 138, 31, 0.35);
+}
+
+@media (display-mode: standalone) {
+  body {
+    overscroll-behavior-y: none;
+  }
+}
