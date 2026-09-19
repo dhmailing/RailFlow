@@ -1,7 +1,7 @@
 import "server-only";
 
 import { getStationConfig } from "@/lib/rail/stations";
-import type { RailProvider, TrainResult, TrainSearchCondition } from "@/lib/rail/types";
+import type { RailScheduleProvider, TrainResult, TrainSearchCondition } from "@/lib/rail/types";
 
 const TAGO_BASE_URL = "https://apis.data.go.kr/1613000/TrainInfo";
 const STATION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -217,7 +217,7 @@ function isHighSpeedTrain(name: string) {
   return /KTX|SRT/i.test(name);
 }
 
-export function createTagoRailProvider(serviceKey: string): RailProvider {
+export function createTagoRailProvider(serviceKey: string): RailScheduleProvider {
   return {
     mode: "live",
     sourceLabel: "국토교통부 TAGO 실제 운행시간표",

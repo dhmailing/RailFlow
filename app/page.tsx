@@ -43,6 +43,7 @@ type InstallPromptEvent = Event & {
 
 const stations: string[] = [...stationNames];
 const SettingsView = dynamic(()=>import("@/components/rail-settings"),{loading:()=> <p role="status">설정 불러오는 중</p>});
+const ReservationJobsPanel = dynamic(()=>import("@/components/reservation-jobs"),{loading:()=> <p role="status">v0.4 예약 작업 상태 불러오는 중</p>});
 
 function kstDate(offsetDays: number) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -456,6 +457,11 @@ export default function Home() {
 
             <TabsContent value="automation" className="m-0">
               <AutomationView reservations={reservations} onRemove={removeReservation} onSimulate={simulateSeat} onFind={() => setActiveTab("booking")} />
+              {activeTab === "automation" && (
+                <div className="mx-auto max-w-3xl">
+                  <ReservationJobsPanel />
+                </div>
+              )}
             </TabsContent>
 
             <TabsContent value="settings" className="m-0">

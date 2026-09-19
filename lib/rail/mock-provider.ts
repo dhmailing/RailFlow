@@ -1,4 +1,4 @@
-import type { RailProvider, TrainResult, TrainSearchCondition } from "@/lib/rail/types";
+import type { RailScheduleProvider, TrainResult, TrainSearchCondition } from "@/lib/rail/types";
 
 const demoRows = [
   { number: "KTX 331", depart: "17:22", arrive: "19:18", durationMinutes: 116, fareKrw: 40_800, availability: "sold_out" as const },
@@ -12,7 +12,7 @@ function formatDuration(minutes: number) {
   return `${hours}시간 ${rest}분`;
 }
 
-export const mockRailProvider: RailProvider = {
+export const mockRailProvider: RailScheduleProvider = {
   mode: "demo",
   sourceLabel: "화면 검증용 데모 운행정보",
   async searchTrains(condition: TrainSearchCondition): Promise<TrainResult[]> {

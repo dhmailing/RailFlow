@@ -35,7 +35,7 @@ export type TrainSearchResponse = {
   trains: TrainResult[];
 };
 
-export interface RailProvider {
+export interface RailScheduleProvider {
   readonly mode: RailProviderMode;
   readonly sourceLabel: string;
   searchTrains(condition: TrainSearchCondition): Promise<TrainResult[]>;
