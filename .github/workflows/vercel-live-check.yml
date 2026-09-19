@@ -1,0 +1,33 @@
+name: One-off Vercel deployment check
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Vercel deployment URL to check (no trailing slash)"
+        required: true
+        default: "https://rail-flow-ten.vercel.app"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check /api/trains/status
+        run: |
+          echo "=== /api/trains/status ==="
+          curl -sS -i "${{ inputs.base_url }}/api/trains/status"
+          echo
+      - name: Check /api/trains/stations?mode=live
+        run: |
+          echo "=== /api/trains/stations?mode=live ==="
+          curl -sS -i "${{ inputs.base_url }}/api/trains/stations?mode=live"
+          echo
+      - name: Check /api/trains/stations?mode=demo
+        run: |
+          echo "=== /api/trains/stations?mode=demo ==="
+          curl -sS -i "${{ inputs.base_url }}/api/trains/stations?mode=demo"
+          echo
+      - name: Check home page
+        run: |
+          echo "=== / ==="
+          curl -sS -o /dev/null -w "code=%{http_code}\n" "${{ inputs.base_url }}/"
