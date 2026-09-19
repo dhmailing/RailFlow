@@ -4,7 +4,7 @@ import { isReservationJobsEnabled } from "@/lib/reservation/feature-flags";
 import * as jobStore from "@/lib/reservation/job-store";
 import { getReservationProvider } from "@/lib/reservation/provider";
 import * as queue from "@/lib/reservation/queue";
-import { assertNotExpired } from "@/lib/reservation/state-machine";
+import { hasExpired, isTerminalStatus } from "@/lib/reservation/state-machine";
 import { ReservationProviderError, type ReservationJob } from "@/lib/reservation/types";
 
 // One job is ever processed at a time in this process, even if two requests
@@ -26,20 +26,48 @@ function assertJobsEnabled(): void {
 
 async function runStep(jobId: string, userId: string): Promise<ReservationJob> {
   const job = jobStore.getJob(jobId, userId);
-  assertNotExpired(job);
 
-  if (job.status === "COMPLETED" || job.status === "CANCELLED" || job.status === "EXPIRED" || job.status === "FAILED" || job.status === "PAYMENT_PENDING") {
+  // Terminal states never move again, no matter what message arrives.
+  if (isTerminalStatus(job.status)) {
     return job;
   }
 
+  // `expiresAt` is the watch/search deadline. It applies to every active state
+  // except PAYMENT_PENDING, whose own deadline is `holdExpiresAt` -- this PR
+  // does not auto-expire PAYMENT_PENDING (see docs/V0.4-ARCHITECTURE.md). A
+  // job that is past its deadline is persisted as EXPIRED right here, instead
+  // of merely throwing, so the UI's "만료됨" state is real and a stale retry
+  // of the same message can never push it any further.
+  if (job.status !== "PAYMENT_PENDING" && hasExpired(job)) {
+    return jobStore.transitionJob(jobId, userId, "EXPIRED", "작업 유효기간(expiresAt)이 지나 자동으로 만료되었습니다.");
+  }
+
+  // Provider mismatch is checked before anything else that follows, and for
+  // every remaining active state including PAYMENT_PENDING and HELD -- a mid-
+  // flight RAIL_RESERVATION_PROVIDER change must be representable no matter
+  // which state the job was in when it happened. `job.provider` (the string
+  // recorded at creation) never changes, so this only fires once per job: the
+  // `job.status !== "PROVIDER_CHANGED"` guard stops a second tick from trying
+  // the no-op PROVIDER_CHANGED -> PROVIDER_CHANGED transition (which the state
+  // machine correctly rejects, since canTransition requires from !== to).
   const provider = getReservationProvider();
-  if (provider.name !== job.provider) {
+  if (provider.name !== job.provider && job.status !== "PROVIDER_CHANGED") {
     return jobStore.transitionJob(
       jobId,
       userId,
       "PROVIDER_CHANGED",
       `Provider가 ${job.provider}에서 ${provider.name}(으)로 변경됐습니다.`,
     );
+  }
+
+  // PROVIDER_CHANGED and PAYMENT_PENDING never auto-advance in this PR.
+  // PROVIDER_CHANGED needs a human/future decision (cancel, or a real
+  // migration path) rather than an automatic move to FAILED; RailFlow does
+  // not automate payment, and hold-expiry handling is explicitly out of
+  // scope (see the `holdExpiresAt` comment in types.ts and
+  // docs/V0.4-ARCHITECTURE.md).
+  if (job.status === "PROVIDER_CHANGED" || job.status === "PAYMENT_PENDING") {
+    return job;
   }
 
   if (job.status === "DRAFT") {
@@ -79,6 +107,7 @@ async function runStep(jobId: string, userId: string): Promise<ReservationJob> {
       const reservation = await provider.reserve(reserving, availability.candidateId);
       return jobStore.transitionJob(jobId, userId, "HELD", "좌석을 확보했습니다.", {
         heldCandidateId: reservation.candidateId,
+        holdExpiresAt: reservation.holdExpiresAt,
       });
     } catch (error) {
       if (!(error instanceof ReservationProviderError)) throw error;
