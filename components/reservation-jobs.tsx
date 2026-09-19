@@ -88,6 +88,15 @@ export default function ReservationJobsPanel() {
 
   useEffect(() => {
     if (!userId) return;
+    // In production, every Demo reservation-job route (except provider-status
+    // itself) fails closed server-side regardless of flags (see
+    // lib/reservation/http.ts's isProductionEnvironment guard) -- so there is
+    // no point calling them here, and the panel below shows the disabled
+    // notice from `isDev` alone without waiting on a network round trip.
+    if (!isDev) {
+      const frame = window.requestAnimationFrame(() => setLoading(false));
+      return () => window.cancelAnimationFrame(frame);
+    }
     let cancelled = false;
     (async () => {
       try {
@@ -165,7 +174,11 @@ export default function ReservationJobsPanel() {
     }
   };
 
-  const runStep = async (id: string, simulationIntervalSeconds?: number) => {
+  // simulationIntervalSeconds is required by the API (server-enforced via
+  // assertSimulationAllowed on every call, not just when present) -- see
+  // app/api/reservations/[id]/simulate/route.ts. There is no "run without a
+  // verification value" path any more.
+  const runStep = async (id: string, simulationIntervalSeconds: 1 | 2 | 3 | 4 | 5) => {
     setBusyJobId(id);
     try {
       const response = await fetch(`/api/reservations/${id}/simulate`, {
@@ -174,7 +187,7 @@ export default function ReservationJobsPanel() {
         body: JSON.stringify({
           userId,
           idempotencyKey: crypto.randomUUID(),
-          ...(simulationIntervalSeconds ? { simulationIntervalSeconds } : {}),
+          simulationIntervalSeconds,
         }),
       });
       const payload = (await response.json()) as { job?: ReservationJob; error?: { message: string } };
@@ -207,7 +220,11 @@ export default function ReservationJobsPanel() {
         실제 코레일·SR 예약은 이루어지지 않습니다. 서버의 예약 작업 상태 전이·Queue·Worker 구조를 검증하기 위한 Mock Provider 결과만 표시됩니다.
       </p>
 
-      {!status || status.reservationProvider === "disabled" || !status.jobsEnabled ? (
+      {!isDev ? (
+        <p className="rounded-2xl border border-white/10 bg-black/30 p-4 text-sm text-white/50">
+          개발용 Mock 기능이며 실제 예약이 아닙니다. 사용자 인증 체계가 도입되기 전까지 이 기능은 운영 환경에서 항상 비활성화되어 있습니다.
+        </p>
+      ) : !status || status.reservationProvider === "disabled" || !status.jobsEnabled ? (
         <p className="rounded-2xl border border-white/10 bg-black/30 p-4 text-sm text-white/50">
           서버의 예약 작업 기능이 아직 비활성화 상태입니다 (RAIL_RESERVATION_PROVIDER / ENABLE_RESERVATION_JOBS). 운영 환경의 기본값은 항상 비활성화입니다.
         </p>
@@ -287,24 +304,31 @@ export default function ReservationJobsPanel() {
                         {job.timeRangeStart}~{job.timeRangeEnd} · 성인 {job.passengers}명 · 후보 {job.candidates.length}개
                       </p>
                     </div>
-                    <span className="rounded-full bg-white/[0.07] px-2.5 py-1 text-[11px] font-bold text-white/70">{STATUS_LABEL[job.status]}</span>
+                    <div className="flex items-center gap-1.5">
+                      {job.simulation && <span className="rounded-full bg-[#ff8a1f]/15 px-2 py-0.5 text-[10px] font-bold text-[#ffad62]">MOCK</span>}
+                      <span className="rounded-full bg-white/[0.07] px-2.5 py-1 text-[11px] font-bold text-white/70">{STATUS_LABEL[job.status]}</span>
+                    </div>
                   </div>
                   <p className="mt-2 text-xs text-white/40">마지막 갱신 {new Date(job.updatedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}</p>
                   {job.lastError && <p className="mt-1 text-xs text-orange-300">최근 오류: {job.lastError.message}</p>}
                   {!["COMPLETED", "CANCELLED", "EXPIRED", "FAILED"].includes(job.status) && (
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <Button size="sm" variant="outline" disabled={busyJobId === job.id} onClick={() => runStep(job.id)} className="rounded-lg border-[#ff8a1f]/30 text-[#ffad62]">
-                        <RefreshCw className="size-3.5" /> Worker 한 단계 실행
-                      </Button>
-                      {isDev && status.mockSimulationEnabled && job.provider === "mock" &&
-                        [1, 2, 3, 4, 5].map((seconds) => (
-                          <Button key={seconds} size="sm" variant="outline" disabled={busyJobId === job.id} onClick={() => runStep(job.id, seconds)} className="rounded-lg border-white/10 text-white/60">
-                            {seconds}초 시뮬레이션
-                          </Button>
-                        ))}
-                      <Button size="sm" variant="ghost" disabled={busyJobId === job.id} onClick={() => cancelJob(job.id)} className="rounded-lg text-white/50">
-                        취소
-                      </Button>
+                    <div className="mt-3">
+                      {status.mockSimulationEnabled && job.provider === "mock" && (
+                        <p className="mb-2 text-[11px] text-white/35">
+                          아래 버튼은 실제로 기다리거나 반복 실행되지 않습니다 — 선택한 검증값으로 Worker 한 단계만 즉시 실행합니다.
+                        </p>
+                      )}
+                      <div className="flex flex-wrap gap-2">
+                        {status.mockSimulationEnabled && job.provider === "mock" &&
+                          [1, 2, 3, 4, 5].map((seconds) => (
+                            <Button key={seconds} size="sm" variant="outline" disabled={busyJobId === job.id} onClick={() => runStep(job.id, seconds as 1 | 2 | 3 | 4 | 5)} className="rounded-lg border-[#ff8a1f]/30 text-[#ffad62]">
+                              <RefreshCw className="size-3.5" /> 검증값 {seconds} · 한 단계 실행
+                            </Button>
+                          ))}
+                        <Button size="sm" variant="ghost" disabled={busyJobId === job.id} onClick={() => cancelJob(job.id)} className="rounded-lg text-white/50">
+                          취소
+                        </Button>
+                      </div>
                     </div>
                   )}
                 </article>
