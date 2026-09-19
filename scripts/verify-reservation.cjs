@@ -4,6 +4,14 @@
 // and lib/reservation/official-reservation-provider-stub.ts. v0.3's own
 // schedule/station/fare regression suite lives in scripts/verify-rail.cjs and
 // is not duplicated here.
+//
+// This file also covers the PR #7 pre-merge review fixes: the simulate route
+// can no longer skip its guard, expiry is a persisted state (not a thrown
+// exception), idempotency keys are scoped per job/user, PROVIDER_CHANGED is
+// reachable from every active state without crashing on a repeat tick, the
+// official Provider Stub is blocked at job creation, every Demo route (save
+// provider-status) refuses to run in production, and the API/UI "simulation"
+// contract is an explicit field on the job, not just on Provider results.
 /* eslint-disable @typescript-eslint/no-require-imports -- CommonJS loader isolates TypeScript modules for offline fixtures. */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -50,9 +58,8 @@ console.error = (...args) => { capturedLogs.push(args.map(String).join(' ')); };
 
 const jobStore = load('lib/reservation/job-store.ts');
 const worker = load('lib/reservation/worker.ts');
-const { assertTransition, canTransition, isTerminalStatus, assertNotExpired } = load('lib/reservation/state-machine.ts');
+const { assertTransition, canTransition, isTerminalStatus, hasExpired } = load('lib/reservation/state-machine.ts');
 const { assertSimulationAllowed } = load('lib/reservation/simulation-guard.ts');
-const reservationTypes = load('lib/reservation/types.ts');
 const provider = load('lib/reservation/provider.ts');
 const queue = load('lib/reservation/queue.ts');
 const reservationsRoute = load('app/api/reservations/route.ts');
@@ -98,21 +105,44 @@ async function withEnv(vars, run) {
   }
 }
 
+// Each POST route has its own rate-limit bucket keyed by x-forwarded-for
+// (falling back to "anonymous" otherwise), so unrelated test scenarios that
+// each fire a handful of requests must use distinct client IDs -- otherwise
+// they'd share one bucket and later scenarios would spuriously see 429s that
+// have nothing to do with what they're actually testing.
+function jsonBody(body, clientId = 'test-client') {
+  return { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', 'x-forwarded-for': clientId } };
+}
+
 async function main() {
-  // -- state machine --
+  // -- state machine: basic transitions --
   assert.equal(canTransition('DRAFT', 'SCHEDULED'), true);
   assert.equal(canTransition('DRAFT', 'HELD'), false);
   assert.throws(() => assertTransition('DRAFT', 'HELD'), { code: 'INVALID_TRANSITION' });
   assert.equal(isTerminalStatus('COMPLETED'), true);
   assert.equal(isTerminalStatus('WATCHING'), false);
   assert.throws(() => assertTransition('COMPLETED', 'WATCHING'), { code: 'INVALID_TRANSITION' });
-  assert.throws(() => assertNotExpired({ status: 'WATCHING', expiresAt: new Date(Date.now() - 1000).toISOString() }), { code: 'INVALID_TRANSITION' });
+
+  // -- hasExpired is a pure predicate, not a throwing assertion --
+  assert.equal(hasExpired({ expiresAt: new Date(Date.now() - 1000).toISOString() }), true);
+  assert.equal(hasExpired({ expiresAt: new Date(Date.now() + 60_000).toISOString() }), false);
+
+  // -- PROVIDER_CHANGED must be reachable from every active state, never from a terminal one --
+  for (const from of ['DRAFT', 'SCHEDULED', 'WATCHING', 'RESERVING', 'HELD', 'PAYMENT_PENDING', 'RATE_LIMITED', 'AUTH_REQUIRED']) {
+    assert.equal(canTransition(from, 'PROVIDER_CHANGED'), true, `${from} -> PROVIDER_CHANGED must be allowed`);
+  }
+  assert.equal(canTransition('PROVIDER_CHANGED', 'FAILED'), true);
+  assert.equal(canTransition('PROVIDER_CHANGED', 'PROVIDER_CHANGED'), false, 'no state, including PROVIDER_CHANGED itself, transitions to itself');
+  for (const terminal of ['COMPLETED', 'CANCELLED', 'EXPIRED', 'FAILED']) {
+    assert.equal(canTransition(terminal, 'PROVIDER_CHANGED'), false, `${terminal} -> PROVIDER_CHANGED must stay blocked`);
+  }
 
   await withEnv({ RAIL_RESERVATION_PROVIDER: 'mock', ENABLE_RESERVATION_JOBS: 'true', ENABLE_MOCK_SIMULATION: 'true', NODE_ENV: 'test' }, async () => {
     // -- duplicate job prevention --
     resetAll();
     const jobA = jobStore.createJob(baseInput(), 'mock');
     assert.equal(jobA.status, 'DRAFT');
+    assert.equal(jobA.simulation, true, 'a job created against the mock Provider must carry simulation:true');
     assert.throws(() => jobStore.createJob(baseInput(), 'mock'), { code: 'DUPLICATE_JOB' });
     // Different date is not a duplicate.
     const jobB = jobStore.createJob(baseInput({ date: '2026-09-27' }), 'mock');
@@ -125,7 +155,8 @@ async function main() {
     // Cancelling frees the dedupe key up for a fresh job with the same route/date/passengers.
     jobStore.createJob(baseInput(), 'mock');
 
-    // -- mock seat-none -> seat-appears -> HELD flow, and "held candidate stops the others" --
+    // -- mock seat-none -> seat-appears -> HELD flow, holdExpiresAt persistence, and
+    // "held candidate stops the others" --
     resetAll();
     const flowJob = jobStore.createJob(
       baseInput({
@@ -136,6 +167,7 @@ async function main() {
       }),
       'mock',
     );
+    assert.equal(flowJob.holdExpiresAt, null);
     let step = await worker.runJobOnce(flowJob.id, flowJob.userId, 'k1'); // DRAFT -> SCHEDULED
     assert.equal(step.status, 'SCHEDULED');
     step = await worker.runJobOnce(flowJob.id, flowJob.userId, 'k2'); // SCHEDULED -> WATCHING
@@ -146,12 +178,14 @@ async function main() {
     step = await worker.runJobOnce(flowJob.id, flowJob.userId, 'k4'); // checks candidate[1]="appears", attempts>=1 -> available -> HELD
     assert.equal(step.status, 'HELD');
     assert.equal(step.heldCandidateId, 'appears');
+    assert.ok(step.holdExpiresAt, 'HELD must record holdExpiresAt from the Provider result');
     // Once HELD, the job (and so the "never" candidate) never gets watched again.
     step = await worker.runJobOnce(flowJob.id, flowJob.userId, 'k5'); // HELD -> PAYMENT_PENDING
     assert.equal(step.status, 'PAYMENT_PENDING');
     assert.equal(step.heldCandidateId, 'appears');
+    assert.ok(step.holdExpiresAt, 'HELD -> PAYMENT_PENDING must not lose holdExpiresAt');
 
-    // -- worker idempotency on duplicate delivery --
+    // -- worker idempotency on duplicate delivery (same job, same key) --
     resetAll();
     const idemJob = jobStore.createJob(baseInput({ candidates: [{ id: 'a', trainNumber: 'KTX 1', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }] }), 'mock');
     const first = await worker.runJobOnce(idemJob.id, idemJob.userId, 'same-key');
@@ -159,13 +193,6 @@ async function main() {
     const replay = await worker.runJobOnce(idemJob.id, idemJob.userId, 'same-key');
     assert.equal(replay.status, 'SCHEDULED', 'duplicate idempotencyKey must not advance the job twice');
     assert.equal(replay.history.length, first.history.length);
-
-    // -- expired job cannot re-enter the reservation path --
-    resetAll();
-    const expiring = jobStore.createJob(baseInput({ expiresAt: new Date(Date.now() + 200).toISOString() }), 'mock');
-    await worker.runJobOnce(expiring.id, expiring.userId, 'e1');
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    await assert.rejects(worker.runJobOnce(expiring.id, expiring.userId, 'e2'), { code: 'INVALID_TRANSITION' });
 
     // -- error scenarios surface structured errors, not thrown network errors --
     resetAll();
@@ -175,6 +202,67 @@ async function main() {
     const afterError = await worker.runJobOnce(errJob.id, errJob.userId, 'r3');
     assert.equal(afterError.status, 'WATCHING');
     assert.equal(afterError.lastError.code, 'CHECK_FAILED');
+  });
+
+  // -- expiry is a persisted EXPIRED state, not a thrown exception, and replaying
+  // an EXPIRED job is a total no-op (no Provider call, no state/history change) --
+  resetAll();
+  await withEnv({ RAIL_RESERVATION_PROVIDER: 'mock', ENABLE_RESERVATION_JOBS: 'true' }, async () => {
+    const expiring = jobStore.createJob(baseInput({ userId: 'demo-expire', expiresAt: new Date(Date.now() + 150).toISOString() }), 'mock');
+    const scheduled = await worker.runJobOnce(expiring.id, expiring.userId, 'e1'); // before the deadline
+    assert.equal(scheduled.status, 'SCHEDULED');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const expired = await worker.runJobOnce(expiring.id, expiring.userId, 'e2');
+    assert.equal(expired.status, 'EXPIRED', 'a past-deadline job must be persisted as EXPIRED, not merely rejected');
+    assert.equal(expired.history.at(-1).to, 'EXPIRED');
+    const rerun = await worker.runJobOnce(expiring.id, expiring.userId, 'e3');
+    assert.equal(JSON.stringify(rerun), JSON.stringify(expired), 'replaying an EXPIRED job must be a total no-op');
+  });
+
+  // -- PAYMENT_PENDING must NOT be auto-expired by the watch deadline (expiresAt);
+  // holdExpiresAt-based expiry is explicitly out of scope for this PR --
+  resetAll();
+  await withEnv({ RAIL_RESERVATION_PROVIDER: 'mock', ENABLE_RESERVATION_JOBS: 'true' }, async () => {
+    const shortJob = jobStore.createJob(
+      baseInput({
+        userId: 'demo-short',
+        expiresAt: new Date(Date.now() + 150).toISOString(),
+        candidates: [{ id: 'c1', trainNumber: 'KTX 9', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }],
+      }),
+      'mock',
+    );
+    await worker.runJobOnce(shortJob.id, shortJob.userId, 's1'); // DRAFT -> SCHEDULED
+    await worker.runJobOnce(shortJob.id, shortJob.userId, 's2'); // SCHEDULED -> WATCHING
+    const held = await worker.runJobOnce(shortJob.id, shortJob.userId, 's3'); // -> HELD
+    assert.equal(held.status, 'HELD');
+    const pending = await worker.runJobOnce(shortJob.id, shortJob.userId, 's4'); // HELD -> PAYMENT_PENDING
+    assert.equal(pending.status, 'PAYMENT_PENDING');
+    await new Promise((resolve) => setTimeout(resolve, 200)); // now well past the watch deadline
+    const stillPending = await worker.runJobOnce(shortJob.id, shortJob.userId, 's5');
+    assert.equal(stillPending.status, 'PAYMENT_PENDING', 'PAYMENT_PENDING must not be auto-expired by expiresAt');
+  });
+
+  // -- PROVIDER_CHANGED reachable from HELD (not just WATCHING/RESERVING), and a
+  // second tick after PROVIDER_CHANGED must not crash (no from===to transition) --
+  resetAll();
+  await withEnv({ RAIL_RESERVATION_PROVIDER: 'mock', ENABLE_RESERVATION_JOBS: 'true' }, async () => {
+    const pcJob = jobStore.createJob(
+      baseInput({ userId: 'demo-pc', candidates: [{ id: 'c1', trainNumber: 'KTX 5', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }] }),
+      'mock',
+    );
+    await worker.runJobOnce(pcJob.id, pcJob.userId, 'p1'); // DRAFT -> SCHEDULED
+    await worker.runJobOnce(pcJob.id, pcJob.userId, 'p2'); // SCHEDULED -> WATCHING
+    const held = await worker.runJobOnce(pcJob.id, pcJob.userId, 'p3'); // -> HELD
+    assert.equal(held.status, 'HELD');
+
+    await withEnv({ RAIL_RESERVATION_PROVIDER: 'official' }, async () => {
+      const changed = await worker.runJobOnce(pcJob.id, pcJob.userId, 'p4');
+      assert.equal(changed.status, 'PROVIDER_CHANGED', 'a Provider flip must be representable from HELD, not just WATCHING/RESERVING');
+      assert.ok(changed.holdExpiresAt, 'PROVIDER_CHANGED must not clear a previously recorded holdExpiresAt');
+      const again = await worker.runJobOnce(pcJob.id, pcJob.userId, 'p5');
+      assert.equal(again.status, 'PROVIDER_CHANGED');
+      assert.equal(again.history.length, changed.history.length, 'a repeat tick after PROVIDER_CHANGED must not throw and must not add history');
+    });
   });
 
   // -- kill switch --
@@ -212,19 +300,29 @@ async function main() {
     assert.throws(() => assertSimulationAllowed({ intervalSeconds: 3, provider: 'mock' }), { code: 'SIMULATION_INTERVAL_NOT_ALLOWED' }, 'ENABLE_MOCK_SIMULATION=false must reject even valid values');
   });
 
-  // -- API routes --
+  // -- idempotency keys are scoped to (userId, jobId), not the raw key alone --
+  queue.__resetQueueForTests();
+  assert.equal(queue.enqueue({ jobId: 'job-a', userId: 'demo-u1', idempotencyKey: 'shared' }), 'queued');
+  assert.equal(queue.enqueue({ jobId: 'job-a', userId: 'demo-u1', idempotencyKey: 'shared' }), 'duplicate', 'same job + same user + same key must be a duplicate');
+  assert.equal(queue.enqueue({ jobId: 'job-b', userId: 'demo-u1', idempotencyKey: 'shared' }), 'queued', 'a different job must not be shadowed by another job\'s raw key');
+  assert.equal(queue.enqueue({ jobId: 'job-a', userId: 'demo-u2', idempotencyKey: 'shared' }), 'queued', 'a different user must not be shadowed by another user\'s raw key, even for the same job id string');
+  queue.__resetQueueForTests();
+
+  // -- API routes: creation, official-provider block, and the simulate route's
+  // required-field guard (no bypass, job untouched on every rejection) --
   await withEnv({ RAIL_RESERVATION_PROVIDER: 'mock', ENABLE_RESERVATION_JOBS: 'true', ENABLE_MOCK_SIMULATION: 'true', NODE_ENV: 'test' }, async () => {
     resetAll();
-    const createReq = new NextRequest('http://test/api/reservations', { method: 'POST', body: JSON.stringify(baseInput({ userId: 'demo-api1' })), headers: { 'content-type': 'application/json' } });
+    const createReq = new NextRequest('http://test/api/reservations', jsonBody(baseInput({ userId: 'demo-api1' }), 'block-api-create'));
     const createRes = await reservationsRoute.POST(createReq);
     assert.equal(createRes.status, 201);
     const created = await createRes.json();
     const jobId = created.job.id;
+    assert.equal(created.job.simulation, true, 'the API create response must explicitly mark the job simulation:true');
 
-    const dupRes = await reservationsRoute.POST(new NextRequest('http://test/api/reservations', { method: 'POST', body: JSON.stringify(baseInput({ userId: 'demo-api1' })), headers: { 'content-type': 'application/json' } }));
+    const dupRes = await reservationsRoute.POST(new NextRequest('http://test/api/reservations', jsonBody(baseInput({ userId: 'demo-api1' }), 'block-api-create')));
     assert.equal(dupRes.status, 409);
 
-    const badRes = await reservationsRoute.POST(new NextRequest('http://test/api/reservations', { method: 'POST', body: JSON.stringify({ userId: 'not-demo' }), headers: { 'content-type': 'application/json' } }));
+    const badRes = await reservationsRoute.POST(new NextRequest('http://test/api/reservations', jsonBody({ userId: 'not-demo' }, 'block-api-create')));
     assert.equal(badRes.status, 400);
 
     const listRes = await reservationsRoute.GET(new NextRequest('http://test/api/reservations?userId=demo-api1'));
@@ -237,15 +335,37 @@ async function main() {
     const wrongUserRes = await reservationDetailRoute.GET(new NextRequest(`http://test/api/reservations/${jobId}?userId=demo-someoneelse`), { params: Promise.resolve({ id: jobId }) });
     assert.equal(wrongUserRes.status, 404);
 
+    // -- simulate: missing field, and every out-of-range value, must be rejected
+    // and must leave the job's status/history/attempts completely untouched --
+    const snapshotBefore = JSON.stringify((await (await reservationDetailRoute.GET(new NextRequest(`http://test/api/reservations/${jobId}?userId=demo-api1`), { params: Promise.resolve({ id: jobId }) })).json()).job);
+
+    const missingRes = await simulateRoute.POST(
+      new NextRequest(`http://test/api/reservations/${jobId}/simulate`, jsonBody({ userId: 'demo-api1', idempotencyKey: 'missing-1' })),
+      { params: Promise.resolve({ id: jobId }) },
+    );
+    assert.equal(missingRes.status, 400, 'omitting simulationIntervalSeconds must be rejected, not silently allowed through');
+
+    for (const bad of [0, 6, 2.5, 'abc', -1]) {
+      const res = await simulateRoute.POST(
+        new NextRequest(`http://test/api/reservations/${jobId}/simulate`, jsonBody({ userId: 'demo-api1', idempotencyKey: `bad-${bad}`, simulationIntervalSeconds: bad })),
+        { params: Promise.resolve({ id: jobId }) },
+      );
+      assert.ok(res.status === 400 || res.status === 403, `interval ${bad} must be rejected at the route (got ${res.status})`);
+    }
+
+    const afterBadJson = await (await reservationDetailRoute.GET(new NextRequest(`http://test/api/reservations/${jobId}?userId=demo-api1`), { params: Promise.resolve({ id: jobId }) })).json();
+    assert.equal(JSON.stringify(afterBadJson.job), snapshotBefore, 'every rejected simulate call must leave the job byte-for-byte unchanged');
+
+    // -- a valid interval actually advances the job --
     const simRes = await simulateRoute.POST(
-      new NextRequest(`http://test/api/reservations/${jobId}/simulate`, { method: 'POST', body: JSON.stringify({ userId: 'demo-api1', idempotencyKey: 'sim-1', simulationIntervalSeconds: 2 }), headers: { 'content-type': 'application/json' } }),
+      new NextRequest(`http://test/api/reservations/${jobId}/simulate`, jsonBody({ userId: 'demo-api1', idempotencyKey: 'sim-1', simulationIntervalSeconds: 2 })),
       { params: Promise.resolve({ id: jobId }) },
     );
     assert.equal(simRes.status, 200);
     assert.equal((await simRes.json()).job.status, 'SCHEDULED');
 
     const cancelRes = await cancelRoute.POST(
-      new NextRequest(`http://test/api/reservations/${jobId}/cancel`, { method: 'POST', body: JSON.stringify({ userId: 'demo-api1' }), headers: { 'content-type': 'application/json' } }),
+      new NextRequest(`http://test/api/reservations/${jobId}/cancel`, jsonBody({ userId: 'demo-api1' })),
       { params: Promise.resolve({ id: jobId }) },
     );
     assert.equal(cancelRes.status, 200);
@@ -259,13 +379,66 @@ async function main() {
 
   // jobs-disabled and provider-disabled must fail closed at the API boundary too
   resetAll();
-  await withEnv({ RAIL_RESERVATION_PROVIDER: 'mock', ENABLE_RESERVATION_JOBS: 'false' }, async () => {
-    const res = await reservationsRoute.POST(new NextRequest('http://test/api/reservations', { method: 'POST', body: JSON.stringify(baseInput({ userId: 'demo-api2' })), headers: { 'content-type': 'application/json' } }));
+  await withEnv({ RAIL_RESERVATION_PROVIDER: 'mock', ENABLE_RESERVATION_JOBS: 'false', NODE_ENV: 'test' }, async () => {
+    const res = await reservationsRoute.POST(new NextRequest('http://test/api/reservations', jsonBody(baseInput({ userId: 'demo-api2' }), 'block-jobs-disabled')));
     assert.equal(res.status, 503);
   });
-  await withEnv({ RAIL_RESERVATION_PROVIDER: 'disabled', ENABLE_RESERVATION_JOBS: 'true' }, async () => {
-    const res = await reservationsRoute.POST(new NextRequest('http://test/api/reservations', { method: 'POST', body: JSON.stringify(baseInput({ userId: 'demo-api3' })), headers: { 'content-type': 'application/json' } }));
+  await withEnv({ RAIL_RESERVATION_PROVIDER: 'disabled', ENABLE_RESERVATION_JOBS: 'true', NODE_ENV: 'test' }, async () => {
+    const res = await reservationsRoute.POST(new NextRequest('http://test/api/reservations', jsonBody(baseInput({ userId: 'demo-api3' }), 'block-provider-disabled')));
     assert.equal(res.status, 503);
+  });
+
+  // -- the official Provider Stub must never be reachable via job creation --
+  resetAll();
+  await withEnv({ RAIL_RESERVATION_PROVIDER: 'official', ENABLE_RESERVATION_JOBS: 'true', NODE_ENV: 'test' }, async () => {
+    const res = await reservationsRoute.POST(new NextRequest('http://test/api/reservations', jsonBody(baseInput({ userId: 'demo-official' }), 'block-official')));
+    assert.equal(res.status, 503);
+    const body = await res.json();
+    assert.equal(body.error.code, 'OFFICIAL_INTEGRATION_REQUIRED');
+  });
+
+  // -- production must fail closed on every Demo route except provider-status,
+  // regardless of every other flag, and must never mutate an existing job --
+  resetAll();
+  await withEnv({ RAIL_RESERVATION_PROVIDER: 'mock', ENABLE_RESERVATION_JOBS: 'true', ENABLE_MOCK_SIMULATION: 'true', NODE_ENV: 'test' }, async () => {
+    const createRes = await reservationsRoute.POST(new NextRequest('http://test/api/reservations', jsonBody(baseInput({ userId: 'demo-prodcheck' }), 'block-production')));
+    const { job: prodJob } = await createRes.json();
+
+    await withEnv({ NODE_ENV: 'production' }, async () => {
+      const createBlocked = await reservationsRoute.POST(new NextRequest('http://test/api/reservations', jsonBody(baseInput({ userId: 'demo-prodcheck2' }), 'block-production')));
+      assert.equal(createBlocked.status, 503);
+
+      const listBlocked = await reservationsRoute.GET(new NextRequest(`http://test/api/reservations?userId=${prodJob.userId}`));
+      assert.equal(listBlocked.status, 503);
+
+      const detailBlocked = await reservationDetailRoute.GET(new NextRequest(`http://test/api/reservations/${prodJob.id}?userId=${prodJob.userId}`), { params: Promise.resolve({ id: prodJob.id }) });
+      assert.equal(detailBlocked.status, 503);
+
+      const cancelBlocked = await cancelRoute.POST(
+        new NextRequest(`http://test/api/reservations/${prodJob.id}/cancel`, jsonBody({ userId: prodJob.userId })),
+        { params: Promise.resolve({ id: prodJob.id }) },
+      );
+      assert.equal(cancelBlocked.status, 503);
+
+      // Even a syntactically valid interval must not reach the Worker in production.
+      const simBlocked = await simulateRoute.POST(
+        new NextRequest(`http://test/api/reservations/${prodJob.id}/simulate`, jsonBody({ userId: prodJob.userId, idempotencyKey: 'prod-sim', simulationIntervalSeconds: 3 })),
+        { params: Promise.resolve({ id: prodJob.id }) },
+      );
+      assert.equal(simBlocked.status, 503);
+      const simBlockedNoField = await simulateRoute.POST(
+        new NextRequest(`http://test/api/reservations/${prodJob.id}/simulate`, jsonBody({ userId: prodJob.userId, idempotencyKey: 'prod-sim-2' })),
+        { params: Promise.resolve({ id: prodJob.id }) },
+      );
+      assert.equal(simBlockedNoField.status, 503);
+
+      // provider-status is explicitly excluded from the production block.
+      const statusRes = await providerStatusRoute.GET();
+      assert.equal(statusRes.status, 200);
+    });
+
+    const afterJson = await (await reservationDetailRoute.GET(new NextRequest(`http://test/api/reservations/${prodJob.id}?userId=${prodJob.userId}`), { params: Promise.resolve({ id: prodJob.id }) })).json();
+    assert.equal(JSON.stringify(afterJson.job), JSON.stringify(prodJob), 'every production-blocked call above must have left the job byte-for-byte unchanged');
   });
 
   console.log = originalLog;
@@ -274,10 +447,6 @@ async function main() {
   assert.equal(fetchCalls, 0, 'the reservation subsystem must never call fetch');
   const leaked = capturedLogs.some((line) => line.includes(FAKE_SECRET));
   assert.equal(leaked, false, 'no reservation log line may contain a secret value');
-
-  // simulation() results always self-identify as mock, per the "never mistaken for a real seat" rule.
-  const sample = reservationTypes;
-  assert.ok(sample.ReservationProviderError);
 
   originalLog(JSON.stringify({ result: 'PASS', fetchCalls, capturedLogLines: capturedLogs.length }));
 }
