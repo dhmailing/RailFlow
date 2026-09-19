@@ -43,9 +43,15 @@ export function createJob(input: ReservationJobInput, provider: "mock" | "offici
     id: crypto.randomUUID(),
     status: "DRAFT",
     provider,
+    // Only "mock" jobs can be created at all (the official Provider is a Stub
+    // blocked at the API boundary), so this is always true today. Kept as a
+    // real field rather than inferred, so the API/UI contract does not
+    // silently change if a real Provider is added later.
+    simulation: provider === "mock",
     createdAt: now,
     updatedAt: now,
     heldCandidateId: null,
+    holdExpiresAt: null,
     attempts: 0,
     lastError: null,
     history: [{ at: now, from: null, to: "DRAFT", reason: "작업 생성" }],
@@ -69,7 +75,7 @@ export function getJob(id: string, userId: string): ReservationJob {
   return job;
 }
 
-export type TransitionPatch = Partial<Pick<ReservationJob, "heldCandidateId" | "attempts" | "lastError">>;
+export type TransitionPatch = Partial<Pick<ReservationJob, "heldCandidateId" | "holdExpiresAt" | "attempts" | "lastError">>;
 
 export function transitionJob(
   id: string,

@@ -78,9 +78,18 @@ export type ReservationJob = ReservationJobInput & {
   id: string;
   status: JobStatus;
   provider: "mock" | "official";
+  // True for every job this PR can create (only "mock" jobs are ever created --
+  // see job-store.createJob and the API-boundary block on "official"). Carried
+  // on the job itself, not just on individual provider results, so the API
+  // envelope and the UI can never present a job as a real reservation.
+  simulation: boolean;
   createdAt: string;
   updatedAt: string;
   heldCandidateId: string | null;
+  // Seat-hold payment deadline from the provider's ReservationResult, distinct
+  // from `expiresAt` (the watch/search deadline). This PR does not auto-expire
+  // PAYMENT_PENDING jobs against it -- see docs/V0.4-ARCHITECTURE.md.
+  holdExpiresAt: string | null;
   attempts: number;
   lastError: { code: ReservationErrorCode; message: string } | null;
   history: ReservationJobHistoryEntry[];
