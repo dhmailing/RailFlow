@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
-import { DEMO_USER_ID_PATTERN, createRateLimiter, errorResponse, reservationErrorResponse } from "@/lib/reservation/http";
+import {
+  DEMO_USER_ID_PATTERN,
+  createRateLimiter,
+  errorResponse,
+  isProductionEnvironment,
+  productionBlockedResponse,
+  reservationErrorResponse,
+} from "@/lib/reservation/http";
 import { cancelJob } from "@/lib/reservation/job-store";
 
 export const dynamic = "force-dynamic";
@@ -10,6 +17,9 @@ const cancelSchema = z.object({ userId: z.string().regex(DEMO_USER_ID_PATTERN) }
 const isRateLimited = createRateLimiter(12);
 
 export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
+  if (isProductionEnvironment()) {
+    return productionBlockedResponse();
+  }
   if (isRateLimited(request)) {
     return errorResponse(429, "RATE_LIMITED", "잠시 후 다시 시도해주세요.");
   }

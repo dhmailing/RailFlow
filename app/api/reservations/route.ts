@@ -2,7 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getReservationProviderFlag, isReservationJobsEnabled } from "@/lib/reservation/feature-flags";
-import { createRateLimiter, DEMO_USER_ID_PATTERN, errorResponse, reservationErrorResponse } from "@/lib/reservation/http";
+import {
+  createRateLimiter,
+  DEMO_USER_ID_PATTERN,
+  errorResponse,
+  isProductionEnvironment,
+  productionBlockedResponse,
+  reservationErrorResponse,
+} from "@/lib/reservation/http";
 import { createJob, listJobs } from "@/lib/reservation/job-store";
 import type { ReservationJobInput } from "@/lib/reservation/types";
 
@@ -40,6 +47,9 @@ const createSchema = z
 const isRateLimited = createRateLimiter(6);
 
 export async function POST(request: NextRequest) {
+  if (isProductionEnvironment()) {
+    return productionBlockedResponse();
+  }
   if (isRateLimited(request)) {
     return errorResponse(429, "RATE_LIMITED", "잠시 후 다시 시도해주세요.");
   }
@@ -50,6 +60,16 @@ export async function POST(request: NextRequest) {
   const providerFlag = getReservationProviderFlag();
   if (providerFlag === "disabled") {
     return errorResponse(503, "JOBS_DISABLED", "예약 Provider가 비활성화되어 있습니다 (RAIL_RESERVATION_PROVIDER=disabled).");
+  }
+  // "official" is a Stub with no confirmed real integration (see
+  // lib/reservation/official-reservation-provider-stub.ts) -- job creation is
+  // blocked here rather than allowed to reach WATCHING and repeatedly fail.
+  if (providerFlag === "official") {
+    return errorResponse(
+      503,
+      "OFFICIAL_INTEGRATION_REQUIRED",
+      "공식 Provider는 아직 실제 연동이 확인되지 않아 예약 작업을 생성할 수 없습니다.",
+    );
   }
 
   let body: unknown;
@@ -74,6 +94,9 @@ export async function POST(request: NextRequest) {
 }
 
 export async function GET(request: NextRequest) {
+  if (isProductionEnvironment()) {
+    return productionBlockedResponse();
+  }
   const userId = request.nextUrl.searchParams.get("userId") ?? "";
   if (!DEMO_USER_ID_PATTERN.test(userId)) {
     return errorResponse(400, "INVALID_USER", "데모 사용자 ID를 확인해주세요.");

@@ -53,3 +53,24 @@ export function createRateLimiter(limitPerMinute: number) {
 // v0.4 has no auth yet, so every user-supplied id is scoped to this demo
 // namespace and validated on every request rather than trusted from the client.
 export const DEMO_USER_ID_PATTERN = /^demo-[a-zA-Z0-9_-]{1,40}$/;
+
+// Every Demo reservation-job route (create/list/detail/cancel/simulate --
+// everything except provider-status, which returns no job data) must refuse
+// to run in production, independent of RAIL_RESERVATION_PROVIDER/
+// ENABLE_RESERVATION_JOBS/ENABLE_MOCK_SIMULATION. There is no user
+// authentication yet: `userId` is a client-generated `demo-*` string, so this
+// is a second, unconditional lock in front of those flags rather than a
+// substitute for one of them. TODO(v0.5+): once real user accounts exist,
+// replace this blanket production block with per-user authentication and
+// authorization instead of removing it outright.
+export function isProductionEnvironment(): boolean {
+  return process.env.NODE_ENV === "production";
+}
+
+export function productionBlockedResponse() {
+  return errorResponse(
+    503,
+    "JOBS_DISABLED",
+    "인증 도입 전까지 Demo 예약 작업 API는 운영 환경에서 항상 비활성화되어 있습니다.",
+  );
+}
