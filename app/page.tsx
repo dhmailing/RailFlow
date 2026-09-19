@@ -502,7 +502,7 @@ function StationSelect({ label, value, onChange, options, loading }: { label: st
     <div className="min-w-0 rounded-2xl border border-white/10 bg-black/35 p-3">
       <p className="mb-2 text-sm text-white/48">{label}</p>
       <Combobox autoHighlight openOnInputClick items={options.map(s=>s.name)} value={value || null} onValueChange={(next)=>onChange(next ?? "")}>
-        <ComboboxInput aria-label={`${label} 선택`} placeholder={`${label} 선택`} disabled={loading} className="w-full min-w-0" />
+        <ComboboxInput aria-label={`${label} 선택`} placeholder={`${label} 선택`} disabled={loading} className="w-full min-w-0" onClick={(event)=>event.currentTarget.select()} onFocus={(event)=>{const input=event.currentTarget;window.requestAnimationFrame(()=>input.select());}} />
         <ComboboxContent><ComboboxEmpty>해당하는 역이 없습니다.</ComboboxEmpty><ComboboxList>{(station:string)=><ComboboxItem key={station} value={station}>{station}</ComboboxItem>}</ComboboxList></ComboboxContent>
       </Combobox>
       {loading && <p role="status" className="mt-2 text-sm text-white/60">역 목록 로딩 중</p>}

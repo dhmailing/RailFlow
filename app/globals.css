@@ -117,6 +117,12 @@ main article > .flex > div { flex:1 1 180px; }
   main article > .flex > button, main article > .flex > a { width:100%; }
 }
 
+/* sonner (toast) sets left+right+width:100% together below 600px, which overflows the
+   viewport by the offset amount because width:100% ignores the right offset (CSS2.1 10.3.7). */
+@media (max-width:600px) {
+  [data-sonner-toaster] { width:calc(100% - var(--mobile-offset-left,16px) - var(--mobile-offset-right,16px)) !important; }
+}
+
 html {
   background: var(--background);
   color-scheme: dark;
