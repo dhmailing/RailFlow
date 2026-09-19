@@ -283,18 +283,20 @@ async function main() {
     assert.throws(() => provider.getReservationProvider(), { code: 'JOBS_DISABLED' });
   });
 
-  // -- simulation guard: 1-5 allowed, everything else rejected --
+  // -- simulation guard: JSON number 1-5 allowed, everything else rejected --
+  // including numeric *strings*, which Number(intervalSeconds) coercion used
+  // to accept as if they were the number itself.
   await withEnv({ ENABLE_MOCK_SIMULATION: 'true', NODE_ENV: 'test' }, () => {
     for (const seconds of [1, 2, 3, 4, 5]) {
       assert.equal(assertSimulationAllowed({ intervalSeconds: seconds, provider: 'mock' }), seconds);
     }
-    for (const bad of [0, 6, 2.5, 'abc', -1]) {
-      assert.throws(() => assertSimulationAllowed({ intervalSeconds: bad, provider: 'mock' }), { code: 'SIMULATION_INTERVAL_NOT_ALLOWED' }, `interval ${bad} must be rejected`);
+    for (const bad of [0, 6, 2.5, -1, 'abc', '1', '2', ' 1 ', '01', '5', null, true, [1], { seconds: 1 }]) {
+      assert.throws(() => assertSimulationAllowed({ intervalSeconds: bad, provider: 'mock' }), { code: 'SIMULATION_INTERVAL_NOT_ALLOWED' }, `interval ${JSON.stringify(bad)} must be rejected`);
     }
     assert.throws(() => assertSimulationAllowed({ intervalSeconds: 3, provider: 'official' }), { code: 'SIMULATION_INTERVAL_NOT_ALLOWED' }, 'non-mock provider must be rejected');
   });
   await withEnv({ ENABLE_MOCK_SIMULATION: 'true', NODE_ENV: 'production' }, () => {
-    assert.throws(() => assertSimulationAllowed({ intervalSeconds: 3, provider: 'mock' }), { code: 'SIMULATION_INTERVAL_NOT_ALLOWED' }, 'production must always reject, regardless of the value');
+    assert.throws(() => assertSimulationAllowed({ intervalSeconds: 3, provider: 'mock' }), { code: 'SIMULATION_INTERVAL_NOT_ALLOWED' }, 'production must always reject a valid numeric value too');
   });
   await withEnv({ ENABLE_MOCK_SIMULATION: 'false', NODE_ENV: 'test' }, () => {
     assert.throws(() => assertSimulationAllowed({ intervalSeconds: 3, provider: 'mock' }), { code: 'SIMULATION_INTERVAL_NOT_ALLOWED' }, 'ENABLE_MOCK_SIMULATION=false must reject even valid values');
@@ -345,12 +347,31 @@ async function main() {
     );
     assert.equal(missingRes.status, 400, 'omitting simulationIntervalSeconds must be rejected, not silently allowed through');
 
-    for (const bad of [0, 6, 2.5, 'abc', -1]) {
+    // Out-of-range numbers, and every non-number JSON type -- numeric strings
+    // ("1", "01", " 1 ") most importantly, since Number(intervalSeconds)
+    // coercion used to let those through as if they were the JSON number 1.
+    const badIntervals = [
+      { label: 'zero', value: 0 },
+      { label: 'six', value: 6 },
+      { label: 'decimal', value: 2.5 },
+      { label: 'negative', value: -1 },
+      { label: 'word-string', value: 'abc' },
+      { label: 'numeric-string-1', value: '1' },
+      { label: 'numeric-string-2', value: '2' },
+      { label: 'numeric-string-padded', value: ' 1 ' },
+      { label: 'numeric-string-zero-padded', value: '01' },
+      { label: 'numeric-string-5', value: '5' },
+      { label: 'null', value: null },
+      { label: 'boolean', value: true },
+      { label: 'array', value: [1] },
+      { label: 'object', value: { seconds: 1 } },
+    ];
+    for (const { label, value } of badIntervals) {
       const res = await simulateRoute.POST(
-        new NextRequest(`http://test/api/reservations/${jobId}/simulate`, jsonBody({ userId: 'demo-api1', idempotencyKey: `bad-${bad}`, simulationIntervalSeconds: bad })),
+        new NextRequest(`http://test/api/reservations/${jobId}/simulate`, jsonBody({ userId: 'demo-api1', idempotencyKey: `bad-${label}`, simulationIntervalSeconds: value })),
         { params: Promise.resolve({ id: jobId }) },
       );
-      assert.ok(res.status === 400 || res.status === 403, `interval ${bad} must be rejected at the route (got ${res.status})`);
+      assert.ok(res.status === 400 || res.status === 403, `interval ${label} (${JSON.stringify(value)}) must be rejected at the route (got ${res.status})`);
     }
 
     const afterBadJson = await (await reservationDetailRoute.GET(new NextRequest(`http://test/api/reservations/${jobId}?userId=demo-api1`), { params: Promise.resolve({ id: jobId }) })).json();

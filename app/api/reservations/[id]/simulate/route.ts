@@ -18,13 +18,18 @@ export const dynamic = "force-dynamic";
 const simulateSchema = z.object({
   userId: z.string().regex(DEMO_USER_ID_PATTERN),
   idempotencyKey: z.string().min(1).max(120),
-  // The "Mock 작업 시뮬레이션 간격" verification value. Required (never
-  // optional) on purpose: an earlier version of this route only validated it
-  // when present, which let a request that simply omitted the field skip
-  // assertSimulationAllowed() and reach the Worker even in production. Every
-  // request now goes through the same required field and the same guard call
-  // below -- there is no code path that runs the Worker without it.
-  simulationIntervalSeconds: z.union([z.number(), z.string()]),
+  // The "Mock 작업 시뮬레이션 간격" verification value: 1-5 as a JSON number,
+  // and nothing else. Required (never optional) on purpose: an earlier
+  // version of this route only validated it when present, which let a
+  // request that simply omitted the field skip assertSimulationAllowed() and
+  // reach the Worker even in production. z.number() alone (no z.union with
+  // z.string(), no z.coerce) also matters: a later version of this route
+  // accepted numeric *strings* ("1", "01", " 1 ") because
+  // assertSimulationAllowed used to call Number(intervalSeconds) on whatever
+  // it was given. Zod itself now rejects a string, null, boolean, array, or
+  // object body before assertSimulationAllowed ever runs, and the guard below
+  // no longer performs any type coercion either.
+  simulationIntervalSeconds: z.number().int().min(1).max(5),
 });
 
 const isRateLimited = createRateLimiter(30);
