@@ -29,7 +29,7 @@ let calls=[];let behavior='success';
 global.fetch=async url=>{
   const parsed=new URL(url);calls.push({path:parsed.pathname,params:Object.fromEntries(parsed.searchParams)});
   await new Promise(resolve=>setTimeout(resolve,30));
-  if(parsed.pathname.endsWith('getCtyAcctoTrainSttnList')) return Response.json(envelope(cityStations[parsed.searchParams.get('cityCode')]));
+  if(parsed.pathname.endsWith('GetCtyAcctoTrainSttnList')) return Response.json(envelope(cityStations[parsed.searchParams.get('cityCode')]));
   if(behavior==='auth') return Response.json({response:{header:{resultCode:'30'}}});
   if(behavior==='limit') return new Response('',{status:429});
   if(behavior==='schema') return Response.json({unexpected:true});

@@ -3,7 +3,7 @@ import "server-only";
 import { getStationConfig } from "@/lib/rail/stations";
 import type { RailProvider, TrainResult, TrainSearchCondition } from "@/lib/rail/types";
 
-const TAGO_BASE_URL = "https://apis.data.go.kr/1613000/TrainInfoService";
+const TAGO_BASE_URL = "https://apis.data.go.kr/1613000/TrainInfo";
 const STATION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 type TagoItem = Record<string, string | number | null | undefined>;
@@ -153,7 +153,7 @@ async function getStationsByCity(serviceKey: string, cityCode: string) {
 
   const existing = stationRequests.get(cityCode);
   if(existing) return existing;
-  const request = fetchTago(serviceKey, "getCtyAcctoTrainSttnList", {
+  const request = fetchTago(serviceKey, "GetCtyAcctoTrainSttnList", {
     cityCode,
     numOfRows: "200",
     pageNo: "1",
@@ -228,7 +228,7 @@ export function createTagoRailProvider(serviceKey: string): RailProvider {
       ]);
       if ((condition.departureId && condition.departureId!==departureId) || (condition.arrivalId && condition.arrivalId!==arrivalId)) throw new TagoProviderError("STATION_NOT_FOUND", "선택한 역 정보를 다시 불러와주세요.");
 
-      const payload = await fetchTago(serviceKey, "getStrtpntAlocFndTrainInfo", {
+      const payload = await fetchTago(serviceKey, "GetStrtpntAlocFndTrainInfo", {
         depPlaceId: departureId,
         arrPlaceId: arrivalId,
         depPlandTime: condition.date.replace(/-/g, ""),
@@ -238,7 +238,7 @@ export function createTagoRailProvider(serviceKey: string): RailProvider {
 
       const total=Number((payload as {response?:{body?:{totalCount?:unknown}}}).response?.body?.totalCount ?? 0);
       if(!Number.isFinite(total) || total>1000) throw new TagoProviderError("SCHEMA", "열차정보 응답 범위를 확인할 수 없습니다.");
-      const remaining=await Promise.all(Array.from({length:Math.max(0,Math.ceil(total/100)-1)},(_,i)=>fetchTago(serviceKey,"getStrtpntAlocFndTrainInfo",{depPlaceId:departureId,arrPlaceId:arrivalId,depPlandTime:condition.date.replace(/-/g,""),numOfRows:"100",pageNo:String(i+2)})));
+      const remaining=await Promise.all(Array.from({length:Math.max(0,Math.ceil(total/100)-1)},(_,i)=>fetchTago(serviceKey,"GetStrtpntAlocFndTrainInfo",{depPlaceId:departureId,arrPlaceId:arrivalId,depPlandTime:condition.date.replace(/-/g,""),numOfRows:"100",pageNo:String(i+2)})));
       return [payload,...remaining].flatMap(asItems)
         .map((item): TrainResult | null => {
           const departure = timestampParts(item.depplandtime);
