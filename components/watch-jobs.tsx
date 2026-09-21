@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { BellRing, Copy, ExternalLink, LoaderCircle, Plus, RefreshCw, ShieldAlert, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { BellRing, Copy, ExternalLink, LoaderCircle, Plus, RefreshCw, ShieldAlert, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -275,10 +276,23 @@ export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
 
   if (!user) {
     return (
-      <section className="mx-auto max-w-3xl rounded-[28px] border border-white/[0.08] bg-[#0d0d0d]/80 p-6 text-center">
-        <ShieldAlert className="mx-auto mb-3 size-8 text-white/25" />
-        <h2 className="text-lg font-extrabold">로그인하면 취소표 감시를 등록할 수 있어요</h2>
-        <p className="mt-2 text-sm text-white/40">마이페이지 탭에서 RailFlow 계정으로 로그인하거나 새로 만들어주세요.</p>
+      <section className="mx-auto max-w-3xl space-y-4">
+        <div className="rounded-[28px] border border-white/[0.08] bg-[#0d0d0d]/80 p-6 text-center">
+          <ShieldAlert className="mx-auto mb-3 size-8 text-white/25" />
+          <h2 className="text-lg font-extrabold">로그인하면 취소표 감시를 등록할 수 있어요</h2>
+          <p className="mt-2 text-sm text-white/40">마이페이지 탭에서 RailFlow 계정으로 로그인하거나 새로 만들어주세요.</p>
+        </div>
+        <Link
+          href="/demo"
+          className="flex items-center gap-3 rounded-2xl border border-[#ff8a1f]/25 bg-[#ff8a1f]/[0.06] p-4 text-left text-sm leading-6 text-white/60 transition hover:border-[#ff8a1f]/40"
+        >
+          <Sparkles className="mt-0.5 size-5 shrink-0 text-[#ff9b3f]" />
+          <span>
+            <span className="font-bold text-[#ffad62]">로그인 없이 가상 시연으로 먼저 둘러보기</span>
+            <br />
+            Demo Showcase에서 감시 등록부터 좌석 발견·알림까지 흐름을 체험할 수 있어요(실제 조회·예약 아님).
+          </span>
+        </Link>
       </section>
     );
   }
@@ -308,6 +322,11 @@ export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
           <p className="mt-1 flex items-center gap-1.5 text-orange-300"><ShieldAlert className="size-4" /> 공식 좌석 Provider가 아직 연결되지 않아 실시간 감시가 작동하지 않습니다.</p>
         )}
         {!status?.jobsEnabled && <p className="mt-1 text-white/40">감시 작업 기능이 서버에서 아직 활성화되지 않았습니다.</p>}
+        {(providerUnavailable || !status?.jobsEnabled) && (
+          <Link href="/demo" className="mt-2 inline-flex items-center gap-1.5 font-bold text-[#ffad62] underline underline-offset-2">
+            <Sparkles className="size-3.5" /> Demo Showcase에서 전체 흐름 가상 시연 보기
+          </Link>
+        )}
       </div>
 
       {storeDisabled ? (

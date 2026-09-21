@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import dynamic from "next/dynamic";
 import {
   ArrowLeftRight,
@@ -11,6 +12,7 @@ import {
   LoaderCircle,
   RefreshCw,
   Search,
+  Sparkles,
   Ticket,
   TrainFront,
   UserRound,
@@ -92,8 +94,18 @@ export default function Home() {
   const [isInstalled, setIsInstalled] = useState(false);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const sessionCheckedRef = useRef(false);
 
+  // §10 검토: 로그인이 필요한 화면(자동예약/마이페이지)이 실제로 열릴 때만
+  // 세션을 확인하는 lazy 방식. 예매 탭만 보는 비로그인 사용자는 애초에
+  // /api/auth/session을 호출하지 않으므로, 항상 예상되는 401이라도 메인
+  // 화면 첫 로드에서 발생시키지 않는다. 한 번 확인한 뒤에는(로그인/로그아웃
+  // 등으로 authUser가 바뀌는 경우를 제외하고) 탭을 오갈 때마다 다시 부르지
+  // 않는다.
   useEffect(() => {
+    if (activeTab !== "automation" && activeTab !== "settings") return;
+    if (sessionCheckedRef.current) return;
+    sessionCheckedRef.current = true;
     let cancelled = false;
     (async () => {
       try {
@@ -113,7 +125,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeTab]);
 
   useEffect(() => {
     const restoreFrame = window.requestAnimationFrame(() => {
@@ -456,6 +468,18 @@ export default function Home() {
                       ? "운행시간과 운임은 공식 공공데이터입니다. 좌석 잔여와 예약은 아직 코레일+에서 확인합니다."
                       : "데모 체험 모드입니다. 표시되는 열차와 예약 결과는 실제가 아닙니다."}
                   </div>
+
+                  <Link
+                    href="/demo"
+                    className="mt-3 flex items-center gap-3 rounded-2xl border border-[#ff8a1f]/25 bg-[#ff8a1f]/[0.06] p-4 text-sm leading-6 text-white/60 transition hover:border-[#ff8a1f]/40"
+                  >
+                    <Sparkles className="mt-0.5 size-5 shrink-0 text-[#ff9b3f]" />
+                    <span>
+                      <span className="font-bold text-[#ffad62]">Demo Showcase 가상 시연 체험하기</span>
+                      <br />
+                      로그인 없이 취소표 감시 등록부터 좌석 발견·알림까지 전체 흐름을 눌러볼 수 있어요. 실제 조회·예약이 아닙니다.
+                    </span>
+                  </Link>
                 </div>
 
                 <div className="min-w-0">
