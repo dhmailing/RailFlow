@@ -436,6 +436,47 @@ async function main() {
   resetAll();
   mockSiteSeed.ensureMockBookingSiteSeeded();
 
+  // -- 19. mock-direct Provider: 브라우저 없이 동일 시나리오를 완주하고,
+  // 실행 불가능한 런타임에서도 mock-browser는 RUNTIME_NOT_SUPPORTED로
+  // 정직하게 실패한다(크래시하지 않는다) --------------------------------
+  await withEnv({ SEAT_AUTOMATION_PROVIDER: 'mock-direct', ENABLE_SEAT_AUTOMATION_JOBS: 'true' }, async () => {
+    resetAll();
+    mockSiteSeed.ensureMockBookingSiteSeeded();
+    const provider = await providerModule.getSeatAutomationProvider();
+    assert.equal(provider.name, 'mock-direct');
+    assert.equal(provider.capabilities().simulation, true);
+
+    const candidate = { id: 'mock-listing-2', trainNumber: 'KTX 107', trainType: 'KTX', departAt: '06:40', arriveAt: '09:22', fareLabel: '₩53,500' };
+    const fakeJob = { watchCycle: 1 };
+    let availability;
+    for (let i = 0; i < 3; i += 1) {
+      availability = await provider.searchAvailability({ job: fakeJob, candidate });
+    }
+    assert.equal(availability.available, true, 'mock-direct Provider도 실제 mock-booking-site 상태(3회차 좌석 발생)를 그대로 따라야 한다');
+    const clickResult = await provider.clickPurchase({ job: fakeJob, candidateId: candidate.id });
+    assert.equal(clickResult.clicked, true);
+    const reserveResult = await provider.reserve({ job: fakeJob, candidateId: candidate.id, idempotencyKey: 'mock-direct-key-1' });
+    assert.match(reserveResult.reservationNumber, /^RF-[A-F0-9]{8}$/);
+    assert.ok(reserveResult.paymentDeadline);
+
+    // mock-direct는 playwright를 전혀 import하지 않으므로 fetch/브라우저
+    // 없이도 항상 usable해야 한다(Cloudflare Workers 등 Playwright가 로드
+    // 불가능한 런타임에서도 동작 -- docs/V0.7-AUTOMATION-BOUNDARY.md §5).
+    const sourceOfMockDirect = readSource('lib/automation/providers/mock-direct-provider.ts');
+    assert.equal(sourceOfMockDirect.includes('from "playwright"'), false, 'mock-direct Provider는 playwright를 import하면 안 된다');
+  });
+  resetAll();
+
+  // RUNTIME_NOT_SUPPORTED 코드 자체가 존재하고 500 계열이 아닌 503으로
+  // 매핑되어 있는지 정적으로 확인한다(provider.ts의 동적 import 실패 catch
+  // 경로가 실제로 이 코드를 던지는지는 이 스크립트가 실제 workerd
+  // 런타임을 재현할 수 없어 직접 확인하지 못한다 -- docs/V0.7-PREVIEW-
+  // DEMO-AUDIT.md §3에 이 경로를 실제 재현해 확인한 내용을 기록했다).
+  const typesSource = readSource('lib/automation/types.ts');
+  assert.ok(typesSource.includes('RUNTIME_NOT_SUPPORTED'), 'AutomationErrorCode에 RUNTIME_NOT_SUPPORTED가 있어야 한다');
+  const httpSource = readSource('lib/automation/http.ts');
+  assert.ok(/RUNTIME_NOT_SUPPORTED:\s*503/.test(httpSource), 'RUNTIME_NOT_SUPPORTED는 503으로 매핑되어야 한다');
+
   // -- mock-site API 라우트 자체를 직접 호출해 계약을 확인(§18과 겹치지 않는
   // 범위: HTTP 계층) --------------------------------------------------------
   await withEnv(DEV_ENABLED, async () => {
