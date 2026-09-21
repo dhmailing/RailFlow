@@ -158,7 +158,27 @@ export type NotificationEventType =
   | "system_halted"
   | "booking_confirmation_requested";
 
-export type NotificationDeliveryStatus = "delivered" | "failed" | "skipped_duplicate" | "skipped_unverified";
+// (검토 재반영, §6) 알림 발송은 "Outbox/Claim" 모델이다: (userId,
+// idempotencyKey) 조합마다 정확히 한 행만 존재하며, 그 행을 원자적으로
+// "claim"(소유권 획득)한 호출자만 실제 Adapter를 호출할 수 있다. 이전의
+// "hasDeliveredNotification() 확인 -> Adapter 발송 -> recordNotificationDelivery()
+// 저장" 3단계는 두 호출자가 동시에 같은 알림을 처리하면(예: Worker 두 개가
+// 겹쳐 실행) 둘 다 1단계를 통과해버릴 수 있는 경쟁 조건이 있었다 -- 발송(비동기
+// 대기) *이후*의 저장 단계 충돌은 이미 외부로 알림이 두 번 나간 뒤이므로
+// 막을 수 없다. claim은 저장소 쓰기 자체가 소유권 발급이므로 발송 전에
+// 원자적으로 단 하나의 호출자만 통과시킨다.
+//
+// - "pending": (Postgres 등 실제 구현에서) 아직 아무도 claim하지 않은 상태.
+//   이 인메모리 구현은 claim 자체가 첫 삽입이라 이 상태를 실제로 만들지는
+//   않지만, 상태 공간에는 남겨둔다(먼저 pending으로 삽입한 뒤 별도 UPDATE로
+//   claim하는 실제 어댑터 구현도 있을 수 있으므로).
+// - "sending": 누군가 claim해 Adapter 호출을 진행 중. `lockExpiresAt`이 지나면
+//   다른 호출자가 이 claim을 만료된 것으로 보고 재획득(retry)할 수 있다.
+// - "delivered"/"failed": Adapter 호출이 끝난 후의 종료 상태. "failed"는
+//   `nextAttemptAt`이 되면 다시 claim할 수 있다(재시도).
+// - "skipped_unverified": 소유권이 확인되지 않은 수신처라 Adapter를 아예
+//   호출하지 않은 경우 -- claim/lease 개념이 필요 없는 별도 종료 상태.
+export type NotificationDeliveryStatus = "pending" | "sending" | "delivered" | "failed" | "skipped_unverified";
 
 export type NotificationDelivery = {
   id: string;
@@ -175,7 +195,36 @@ export type NotificationDelivery = {
   idempotencyKey: string;
   status: NotificationDeliveryStatus;
   deliveryRef: string | null;
+  // 이 idempotencyKey로 claim을 시도한 횟수(최초 claim 포함). 재시도 추적용.
+  attemptCount: number;
+  // 가장 최근 실패 사유(있다면). 원문 수신처·비밀값을 절대 포함하지 않는다.
+  lastError: string | null;
+  // "failed" 상태에서 다시 claim할 수 있게 되는 시각. null이면 즉시 재시도 가능.
+  nextAttemptAt: string | null;
+  // 현재 claim을 보유 중인 동안의 lease 구간 -- lockExpiresAt이 지나면 다른
+  // 호출자가 (Worker가 죽는 등으로 방치된) 이 claim을 재획득할 수 있다.
+  lockedAt: string | null;
+  lockExpiresAt: string | null;
   createdAt: string;
+  updatedAt: string;
+};
+
+export type NotificationClaimInput = {
+  userId: string;
+  watchJobId: string;
+  candidateId: string | null;
+  channel: NotificationChannel;
+  deviceId: string;
+  watchCycle: number;
+  eventType: NotificationEventType;
+  idempotencyKey: string;
+};
+
+export type NotificationClaimOutcome = "claimed" | "duplicate" | "already_claimed";
+
+export type NotificationClaim = {
+  outcome: NotificationClaimOutcome;
+  entry: NotificationDelivery;
 };
 
 export type ConsentType = "no_ticket_sale_disclaimer" | "notification_permission";

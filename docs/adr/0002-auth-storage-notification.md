@@ -60,3 +60,21 @@ v0.4의 ADR 0001과 동일한 결론이 v0.5의 취소표 감시에도 그대로
 | 완전 네이티브(Kotlin + Jetpack Compose) | 처음부터 네이티브로 새로 작성 | 최상의 UX, 완전한 플랫폼 통합 | 이 저장소의 웹 코드와 별도 유지보수 — 두 코드베이스 동기화 비용, 개발 기간 가장 김 |
 
 **결론**: `docs/ANDROID-MVP-PLAN.md`는 **TWA를 1차 목표, Capacitor를 FCM/네이티브 알림 채널이 꼭 필요해질 때의 전환 후보**로 제시한다. 완전 네이티브 재작성은 이 앱의 핵심 가치(서버가 감시하고 알리기만 하면 됨, 클라이언트는 얇아도 됨)에 비해 비용이 크므로 권장하지 않는다.
+
+## 7. 알림 발송 동시성 모델: "확인 후 발송" vs Outbox/Claim (검토 반영)
+
+최초 구현은 알림 발송을 3단계로 나눴다: (1) `hasDeliveredNotification()`으로 이미 보냈는지 확인, (2) 어댑터로 실제 발송(`await`), (3) 성공 시에만 `recordNotificationDelivery()`로 저장. 검토에서 지적된 결함: 두 Worker(또는 같은 Worker의 겹친 실행)가 정확히 같은 `(userId, idempotencyKey)`를 동시에 처리하면, 둘 다 (1)의 확인을 통과한 뒤 각자 (2)에서 실제로 어댑터를 호출해버릴 수 있다 — (3)의 저장 단계에서 유니크 제약 충돌이 나더라도, 그 시점에는 이미 외부로 알림이 두 번 나간 뒤라 아무 의미가 없다.
+
+| 후보 | 설명 | 장점 | 단점 |
+| --- | --- | --- | --- |
+| **Outbox/Claim(채택)** | 발송 전에 `(userId, idempotencyKey)` 행을 원자적으로 "claim"(삽입 또는 조건부 UPDATE)하고, claim에 성공한 호출자만 어댑터를 부른다 | 확인과 저장 사이의 경쟁 구간이 사라짐 — 인메모리 구현은 Node.js 단일 스레드+동기 Map 연산으로, Postgres 구현은 `insert ... on conflict do nothing`/조건부 `update`의 행 잠금으로 각각 원자성을 보장 | 상태 모델이 하나 늘어남(`sending`, lease 만료 처리 필요) |
+| 분산 락(Redis 등) | claim 대신 외부 락 서비스를 둔다 | 여러 언어/런타임에서 재사용 가능 | 새 인프라(Redis) 필요 — 이번 PR의 "새 유료/외부 인프라 생성 금지" 원칙과 충돌 |
+| DB advisory lock | Postgres의 `pg_advisory_lock` 사용 | 새 인프라 불필요 | 연결(connection) 수명에 락이 묶여 서버리스 환경(Vercel)과 궁합이 나쁨, 이번 PR엔 실제 DB 연결 자체가 없음 |
+
+**결론**: Outbox/Claim을 채택했다. 인메모리 구현(`lib/watch/store.ts`의 `claimNotification`/`completeNotificationClaim`)과 실제 Postgres 구현이 같은 인터페이스·같은 원자성 보장을 갖도록 설계했다(SQL 패턴은 `db/postgres/migrations/0001_init.sql`의 `notification_deliveries` 테이블 주석 참고). claim을 얻지 못한 Worker는 외부 알림 서비스를 절대 호출하지 않는다. 처리 중(`sending`) 상태에는 lease(`lock_expires_at`, 기본 30초)를 둬서, Worker가 어댑터 호출 도중 죽어도 다른 Worker가 방치된 claim을 재획득해 재시도할 수 있게 했다.
+
+## 8. Origin 검증: Host 헤더 비교 vs APP_ORIGIN (검토 반영)
+
+최초 구현은 CSRF 방어를 위해 요청의 `Origin` 헤더 host를 그 요청 자체의 `Host` 헤더와 비교했다. 검토에서 지적된 결함 두 가지: (1) `Host` 헤더는 프록시/로드밸런서 설정에 따라 신뢰할 수 없을 수 있어, 공격자가 통제하는 `Host`와 그에 맞춘 `Origin`을 함께 보내면 우회 가능하다. (2) host만 비교하고 스킴(scheme)을 무시하면 `http://정상호스트`와 `https://정상호스트`를 같은 출처로 오인한다.
+
+**결론**: 배포자가 알고 있는 정확한 값을 `APP_ORIGIN` 환경변수(`scheme://host[:port]`)로 명시하고, 요청의 `Origin`을 그 값과 전체 비교(스킴+호스트+포트)하도록 바꿨다(`lib/security/origin-guard.ts`). `APP_ORIGIN`이 없거나 형식이 잘못되면 Production의 모든 상태 변경 요청을 fail-closed로 거부한다 — "일단 Host로 비교해본다"는 폴백을 두지 않았다. 이 방식의 트레이드오프는 배포마다(Vercel Preview 등) 값이 달라지는 환경에서는 배포 자동화가 그 값을 정확히 주입해야 한다는 점이다 — Preview는 매 배포마다 URL이 바뀌므로 Production과 같은 `APP_ORIGIN`을 공유할 수 없고, 이번 PR은 Preview용 자동 주입 파이프라인을 만들지 않았다(Preview에서 실제 인증까지 켜고 싶다면 별도 안정 도메인을 붙이거나, 그 환경 전용 값을 수동으로 설정해야 한다).

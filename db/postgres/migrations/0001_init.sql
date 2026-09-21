@@ -154,18 +154,76 @@ create table watch_job_history (
 );
 create index watch_job_history_job_id_idx on watch_job_history (watch_job_id, at);
 
--- === notification_deliveries ====================================================
--- NotificationDelivery (§3-B). Idempotency is enforced per user via a partial
--- unique index on 'delivered' rows only -- a 'failed' attempt is retryable
--- (see lib/watch/notification/dispatch.ts and store.ts's comment on why only
--- a successful send may poison the idempotency key).
--- device_id + watch_cycle are stored as their own columns (not just folded
--- into idempotency_key) so a real adapter can query/audit "did this specific
--- device already get notified this cycle" without parsing the key string --
--- §6 검토사항: 이전에는 idempotency_key가 jobId:candidateId:eventType뿐이라
--- 여러 채널/기기가 하나의 키를 공유해, 첫 성공 알림이 나머지를 모두
--- 억제해버렸다. 이제 idempotency_key 자체도 channel+device_id+watch_cycle을
--- 포함하도록 애플리케이션(lib/watch/worker.ts)이 구성한다.
+-- === notification_deliveries (Outbox/Claim 테이블) ===============================
+-- NotificationDelivery (§3-B). (검토 재반영, §6) 이 테이블은 append-only 로그가
+-- 아니라 "Outbox"다 -- (user_id, idempotency_key) 조합마다 정확히 한 행만
+-- 존재하고, 그 행의 status를 원자적으로 전이시키는 것 자체가 "발송 권한
+-- (claim)"이다. 재검토 이전 설계는 "hasDeliveredNotification()으로 확인 ->
+-- 어댑터 발송(await) -> 성공 시에만 별도 unique index로 저장"이었는데,
+-- **확인과 저장 사이의 await 구간**에서 두 Worker가 동시에 같은 알림을
+-- 처리하면 (예: Worker 인스턴스 두 개가 겹쳐 실행) 둘 다 "아직 안 보냈다"는
+-- 확인을 통과해버릴 수 있었다. 그 시점에는 이미 외부로 알림이 두 번
+-- 나간 뒤이므로, 발송 *이후*에 unique index 충돌이 나도 중복 발송 자체는
+-- 막지 못한다.
+--
+-- 해결책: 발송 "전"에 이 행을 원자적으로 claim한다. 애플리케이션
+-- (lib/watch/store.ts의 claimNotification)이 하는 일을 SQL로 옮기면:
+--
+--   -- 1) 새 알림이면 이 INSERT 하나가 곧 claim이다. 동시에 여러 요청이
+--   --    똑같은 (user_id, idempotency_key)로 이 문장을 실행해도, Postgres는
+--   --    유니크 제약을 행 삽입 시점에 검사하므로 정확히 하나만 성공한다.
+--   insert into notification_deliveries
+--     (user_id, watch_job_id, candidate_id, channel, device_id, watch_cycle,
+--      event_type, idempotency_key, status, attempt_count, locked_at, lock_expires_at)
+--   values
+--     ($1, $2, $3, $4, $5, $6, $7, $8, 'sending', 1, now(), now() + interval '30 seconds')
+--   on conflict (user_id, idempotency_key) do nothing
+--   returning *;
+--   -- 0행이 반환되면(이미 존재) 아래로 진행한다.
+--
+--   -- 2) 기존 행을 읽어 duplicate/already_claimed/재시도 가능 여부를 판단한다.
+--   select * from notification_deliveries where user_id = $1 and idempotency_key = $8;
+--   --   status = 'delivered' 또는 'skipped_unverified' -> duplicate(그대로 반환, claim 안 함)
+--   --   status = 'sending' and lock_expires_at > now()   -> already_claimed(다른 Worker가 처리 중)
+--   --   status = 'sending' and lock_expires_at <= now()  -> 방치된 claim, 아래 3)으로 재획득 시도
+--   --   status = 'failed'  and next_attempt_at <= now()  -> 재시도 가능, 아래 3)으로 재획득 시도
+--   --   status = 'failed'  and next_attempt_at >  now()  -> already_claimed(아직 재시도 시각 아님)
+--
+--   -- 3) 조건부 UPDATE로 재획득을 시도한다 -- WHERE 절의 조건이 여전히
+--   --    참이어야만 실제로 행을 갱신하고 반환하므로(Postgres의 행 잠금이
+--   --    동시 요청 중 하나만 통과시킨다), 이 UPDATE 자체가 원자적 claim이다.
+--   update notification_deliveries
+--   set status = 'sending', attempt_count = attempt_count + 1,
+--       locked_at = now(), lock_expires_at = now() + interval '30 seconds',
+--       updated_at = now()
+--   where user_id = $1 and idempotency_key = $8
+--     and (
+--       (status = 'sending' and lock_expires_at <= now())
+--       or (status = 'failed' and next_attempt_at <= now())
+--     )
+--   returning *;
+--   -- 0행이 반환되면 다른 Worker가 먼저 재획득에 성공한 것이므로
+--   -- already_claimed로 취급하고 어댑터를 호출하지 않는다.
+--
+--   -- 4) claim에 성공한 호출자만 실제 어댑터를 호출하고, 끝나면 종료 상태로 전이한다:
+--   update notification_deliveries
+--   set status = 'delivered', delivery_ref = $9, locked_at = null, lock_expires_at = null, updated_at = now()
+--   where user_id = $1 and idempotency_key = $8;
+--   -- 실패 시:
+--   update notification_deliveries
+--   set status = 'failed', last_error = $10, next_attempt_at = now(), locked_at = null, lock_expires_at = null, updated_at = now()
+--   where user_id = $1 and idempotency_key = $8;
+--
+-- `last_error`에는 절대 실제 알림 목적지 원문이나 비밀값을 넣지 않는다 --
+-- 구조화된 오류 메시지만 기록한다(lib/watch/notification/dispatch.ts 참고).
+--
+-- device_id + watch_cycle은 자체 컬럼으로도 저장한다(idempotency_key 문자열
+-- 파싱 없이 "이 기기가 이번 세대에 이미 알림을 받았는지" 조회/감사할 수
+-- 있도록) -- §6 검토사항: 이전에는 idempotency_key가 jobId:candidateId:
+-- eventType뿐이라 여러 채널/기기가 하나의 키를 공유해, 첫 성공 알림이
+-- 나머지를 모두 억제해버렸다. 이제 idempotency_key 자체도
+-- channel+device_id+watch_cycle을 포함하도록 애플리케이션
+-- (lib/watch/worker.ts)이 구성한다.
 create table notification_deliveries (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references users (id) on delete cascade,
@@ -178,14 +236,28 @@ create table notification_deliveries (
     event_type in ('seat_found', 'watch_started', 'watch_expired', 'auth_required', 'provider_unavailable', 'duplicate_job_blocked', 'system_halted', 'booking_confirmation_requested')
   ),
   idempotency_key text not null,
-  status text not null check (status in ('delivered', 'failed', 'skipped_duplicate', 'skipped_unverified')),
+  status text not null check (status in ('pending', 'sending', 'delivered', 'failed', 'skipped_unverified')),
   delivery_ref text,
-  created_at timestamptz not null default now()
+  attempt_count integer not null default 0,
+  last_error text,
+  next_attempt_at timestamptz,
+  locked_at timestamptz,
+  lock_expires_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  -- 이전 설계는 status='delivered' 행만 대상으로 하는 partial unique
+  -- index였다 -- 이 테이블이 append-only 로그였을 때는 그것으로 충분했지만,
+  -- 이제는 한 idempotency_key당 정확히 한 행만 존재해야 하므로(Outbox 모델)
+  -- 상태와 무관한 전체 unique 제약이어야 한다. 이 제약 자체가 위 claim
+  -- 패턴의 `on conflict (user_id, idempotency_key)` 대상이다.
+  unique (user_id, idempotency_key)
 );
 create index notification_deliveries_user_id_idx on notification_deliveries (user_id, watch_job_id);
-create unique index notification_deliveries_delivered_idempotency_idx
-  on notification_deliveries (user_id, idempotency_key)
-  where status = 'delivered';
+-- 방치된(lease 만료) claim이나 재시도 대기 중인 실패 건을 스캔하는 백그라운드
+-- 잡(cron 등)이 있다면 이 인덱스로 효율적으로 찾을 수 있다.
+create index notification_deliveries_reclaimable_idx
+  on notification_deliveries (status, lock_expires_at, next_attempt_at)
+  where status in ('sending', 'failed');
 
 -- === consent_history =============================================================
 -- ConsentHistory (§3-B) -- append-only; never updated or deleted except by a
@@ -223,3 +295,42 @@ create table audit_events (
 create index audit_events_user_id_idx on audit_events (user_id, at);
 
 commit;
+
+-- === 계정 삭제 트랜잭션 예시 (실제 DDL 아님, Postgres Adapter 구현 참고용) ============
+--
+-- DELETE /api/auth/account가 재인증에 성공하면 이 모양의 트랜잭션 하나로
+-- 처리한다. 핵심은: 가명 UUID를 애플리케이션(또는 아래처럼 트랜잭션 맨 앞의
+-- 별도 `select`)에서 "정확히 한 번" 생성해 파라미터로 바인딩하고, 그 값을
+-- audit_events UPDATE 한 번에 그대로 재사용하는 것이다.
+--
+-- 절대 하면 안 되는 것: `update audit_events set user_id = gen_random_uuid()
+-- where user_id = $1` 처럼 UPDATE 문 안에서 직접 gen_random_uuid()를 호출하는
+-- 것 -- 이 경우 Postgres가 매 행(row)마다 새 값을 평가하므로, 같은 사용자의
+-- 이벤트가 여러 개면 서로 다른 가명 UUID를 갖게 되어 "같은 사용자는 같은
+-- 가명을 공유해야 한다"는 요구사항이 깨진다.
+--
+-- begin;
+--   -- 1) 이 삭제 한 번을 위한 가명 UUID를 정확히 한 번만 생성한다.
+--   --    (애플리케이션에서 crypto.randomUUID()로 생성해 바인딩해도 되고,
+--   --    아래처럼 SQL에서 만들어 클라이언트로 돌려받은 뒤 같은 트랜잭션
+--   --    안에서 파라미터로 재사용해도 된다.)
+--   select gen_random_uuid() as pseudonym; -- 애플리케이션이 이 값을 $2로 캡처
+--
+--   -- 2) 이 사용자의 모든 AuditEvent를 "동일한" 가명으로 한 번에 치환한다.
+--   --    원래 user_id($1)와 새 가명($2) 사이의 매핑은 이 트랜잭션 밖 어디에도
+--   --    저장하지 않는다 -- 저장하면 역추적이 다시 가능해진다.
+--   update audit_events set user_id = $2 where user_id = $1;
+--
+--   -- 3) 이 사용자가 소유한 나머지 데이터는 실제로 삭제한다(가명처리가 아님).
+--   delete from watch_job_history where watch_job_id in (select id from watch_jobs where user_id = $1);
+--   delete from notification_deliveries where user_id = $1;
+--   delete from watch_job_candidates where watch_job_id in (select id from watch_jobs where user_id = $1);
+--   delete from watch_jobs where user_id = $1;
+--   delete from devices where user_id = $1;
+--   delete from consent_history where user_id = $1;
+--   delete from sessions where user_id = $1;
+--   delete from users where id = $1;
+-- commit;
+--
+-- 위 순서(자식 테이블 먼저)는 `on delete cascade` FK가 이미 대부분 처리해
+-- 주지만, 트랜잭션 안에서 명시적으로 지워도 안전하고 의도가 더 분명하다.

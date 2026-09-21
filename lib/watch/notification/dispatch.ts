@@ -1,7 +1,7 @@
 import "server-only";
 
 import { getNotificationAdapter } from "@/lib/watch/notification/get-adapter";
-import { hasDeliveredNotification, recordNotificationDelivery } from "@/lib/watch/store";
+import { claimNotification, completeNotificationClaim, recordSkippedUnverified } from "@/lib/watch/store";
 import { WatchError, type NotificationChannel, type NotificationDelivery, type NotificationEventType } from "@/lib/watch/types";
 
 export type DispatchNotificationInput = {
@@ -21,14 +21,15 @@ export type DispatchNotificationInput = {
   body: string;
 };
 
-// 이전에 *성공(delivered)*한 알림과 같은 idempotencyKey면 어댑터를 다시
-// 호출하지 않고 "skipped_duplicate"만 기록한다. *실패(failed)*했던 시도는
-// 그렇지 않다 -- 다음 Worker tick에서 같은 키로 재시도할 수 있어야 한다.
-// idempotencyKey는 channel+deviceId+watchCycle까지 포함하도록 호출자
-// (lib/watch/worker.ts)가 구성하므로, 여러 채널·여러 기기가 각자 한 번씩
-// 알림을 받고, 같은 채널·같은 기기·같은 이벤트의 완전한 중복만 걸러진다.
-export async function dispatchNotification(input: DispatchNotificationInput): Promise<NotificationDelivery | null> {
-  const baseRecord = {
+// (재검토, §6) 발송 "전"에 원자적으로 소유권(claim)을 획득한 호출자만 실제
+// Adapter를 호출한다. 두 호출자가 동시에 같은 idempotencyKey로 이 함수를
+// 부르면(예: Worker 두 개가 겹쳐 실행) claimNotification()이 오직 하나에게만
+// "claimed"를 돌려주므로, 나머지는 여기서 즉시 반환하고 어댑터를 절대 건드리지
+// 않는다. 이전 구현("이미 성공했는지 확인 -> await로 어댑터 호출 -> 저장")은
+// 확인과 저장 사이의 await 구간에서 두 호출 모두 확인을 통과할 수 있었다 --
+// 그 구간이 사라졌다.
+export async function dispatchNotification(input: DispatchNotificationInput): Promise<NotificationDelivery> {
+  const claimInput = {
     userId: input.userId,
     watchJobId: input.watchJobId,
     candidateId: input.candidateId,
@@ -40,11 +41,15 @@ export async function dispatchNotification(input: DispatchNotificationInput): Pr
   };
 
   if (!input.deviceVerified) {
-    return recordNotificationDelivery({ ...baseRecord, status: "skipped_unverified", deliveryRef: null });
+    return recordSkippedUnverified(claimInput);
   }
 
-  if (hasDeliveredNotification(input.userId, input.idempotencyKey)) {
-    return recordNotificationDelivery({ ...baseRecord, status: "skipped_duplicate", deliveryRef: null });
+  const claim = claimNotification(claimInput);
+  if (claim.outcome !== "claimed") {
+    // "duplicate": 이미 delivered/skipped_unverified로 끝난 알림.
+    // "already_claimed": 다른 호출자가 지금 처리 중이거나, 아직 재시도 시각이 되지 않음.
+    // 어느 쪽이든 이 호출은 어댑터를 절대 호출하지 않는다.
+    return claim.entry;
   }
 
   const adapter = getNotificationAdapter(input.channel);
@@ -60,14 +65,21 @@ export async function dispatchNotification(input: DispatchNotificationInput): Pr
       title: input.title,
       body: input.body,
     });
-    return recordNotificationDelivery({
-      ...baseRecord,
-      status: result.delivered ? "delivered" : "failed",
+    return completeNotificationClaim(input.userId, input.idempotencyKey, {
+      delivered: result.delivered,
       deliveryRef: result.deliveryRef,
+      error: result.delivered ? null : "어댑터가 발송 실패를 반환했습니다.",
     });
   } catch (error) {
     if (error instanceof WatchError) {
-      return recordNotificationDelivery({ ...baseRecord, status: "failed", deliveryRef: null });
+      // 실제 알림 목적지 원문이나 비밀값을 오류에 남기지 않는다 -- 구조화된
+      // WatchError.message만 기록한다(어댑터가 destination을 오류 메시지에
+      // 넣지 않는다는 전제는 lib/watch/notification/adapters.ts 참고).
+      return completeNotificationClaim(input.userId, input.idempotencyKey, {
+        delivered: false,
+        deliveryRef: null,
+        error: error.message,
+      });
     }
     throw error;
   }
