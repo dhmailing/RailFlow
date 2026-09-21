@@ -56,6 +56,46 @@ function readSource(relative) {
   return fs.readFileSync(path.join(root, relative), 'utf8');
 }
 
+// 시간 관련 테스트를 실제로 기다리지 않고 결정론적으로 만들기 위한 고정
+// 시각 헬퍼(재검토 §1/§4). `new Date()`(인자 없는 호출 -- lib/demo/reducer.ts의
+// transition()이 쓰는 형태)만 고정 시각으로 가로채고, `new Date(문자열)`처럼
+// 인자가 있는 호출은 원래 Date로 그대로 위임한다 -- 그래야
+// computeElapsedSeconds가 저장된 ISO 문자열을 파싱하는 동작까지 왜곡되지
+// 않는다.
+function withFixedDate(fixedMs, fn) {
+  const OriginalDate = global.Date;
+  class FixedDate extends OriginalDate {
+    constructor(...args) {
+      if (args.length === 0) {
+        super(fixedMs);
+      } else {
+        super(...args);
+      }
+    }
+    static now() {
+      return fixedMs;
+    }
+  }
+  global.Date = FixedDate;
+  try {
+    return fn();
+  } finally {
+    global.Date = OriginalDate;
+  }
+}
+
+function makeFakeStorage() {
+  const backing = new Map();
+  return {
+    backing,
+    storage: {
+      getItem: (key) => (backing.has(key) ? backing.get(key) : null),
+      setItem: (key, value) => backing.set(key, value),
+      removeItem: (key) => backing.delete(key),
+    },
+  };
+}
+
 function demoSourceFiles() {
   const files = [];
   for (const dir of ['lib/demo', 'components/demo', 'app/demo']) {
@@ -298,6 +338,236 @@ async function main() {
     assert.doesNotThrow(() => storageModule.writeDemoState(throwingStorage, state));
     assert.doesNotThrow(() => storageModule.clearDemoState(throwingStorage));
     assert.equal(storageModule.readDemoState(throwingStorage), null);
+  }
+
+  // -- 13. 경과 시간 모델(startedAt/endedAt) -------------------------------
+  // 전부 withFixedDate로 시각을 직접 통제한다 -- 실제로 기다리지 않는다.
+  {
+    const T0 = new Date('2026-01-01T00:00:00.000Z').getTime();
+    let clockMs = T0;
+
+    // 13-1. 감시 시작 전(READY) 경과 시간은 항상 0.
+    let state = withFixedDate(clockMs, () => createDefaultDemoState());
+    assert.equal(state.startedAt, null);
+    assert.equal(state.endedAt, null);
+    assert.equal(reducerModule.computeElapsedSeconds(state, clockMs), 0, 'READY에서는 경과 시간이 0이어야 한다');
+
+    const [first, second] = state.candidates;
+    state = withFixedDate(clockMs, () => demoReducer(state, { type: 'TOGGLE_CANDIDATE', candidateId: first.id }));
+    state = withFixedDate(clockMs, () => demoReducer(state, { type: 'TOGGLE_CANDIDATE', candidateId: second.id }));
+
+    // 13-2. 감시 시작(REGISTER) 시 startedAt이 그 순간의 시각으로 저장된다.
+    state = withFixedDate(clockMs, () => demoReducer(state, { type: 'REGISTER' }));
+    assert.equal(state.startedAt, new Date(T0).toISOString(), 'REGISTER 시점의 시각이 startedAt으로 저장돼야 한다');
+    assert.equal(state.endedAt, null);
+    assert.equal(reducerModule.computeElapsedSeconds(state, clockMs), 0, '등록 직후 경과 시간은 0');
+
+    // 13-3. 활성 상태(REGISTERED/WATCHING/...)에서는 시간이 흐른 만큼 증가한다.
+    clockMs += 3000;
+    assert.equal(reducerModule.computeElapsedSeconds(state, clockMs), 3, '활성 상태에서는 경과 시간이 증가해야 한다');
+    clockMs += 4000; // 누적 +7s
+    assert.equal(reducerModule.computeElapsedSeconds(state, clockMs), 7);
+
+    state = withFixedDate(clockMs, () => demoReducer(state, { type: 'START_WATCHING' }));
+    state = withFixedDate(clockMs, () => demoReducer(state, { type: 'TICK' })); // tick 1
+    state = withFixedDate(clockMs, () => demoReducer(state, { type: 'TICK' })); // tick 2 -> SEAT_FOUND
+    assert.equal(state.status, 'SEAT_FOUND');
+    state = withFixedDate(clockMs, () => demoReducer(state, { type: 'MARK_NOTIFIED' }));
+    assert.equal(state.status, 'NOTIFIED');
+    assert.equal(state.endedAt, null, 'NOTIFIED는 아직 활성 상태이므로 endedAt이 없어야 한다');
+
+    clockMs += 2000; // 누적 +9s, FINISH 시점
+    state = withFixedDate(clockMs, () => demoReducer(state, { type: 'FINISH' }));
+
+    // 13-4. FINISHED 이후에는 경과 시간이 endedAt-startedAt으로 고정된다 --
+    // 시간이 더 흘러도(여기서는 clockMs를 더 진행시켜도) 절대 0으로
+    // 되돌아가거나 계속 증가하면 안 된다.
+    assert.equal(state.status, 'FINISHED');
+    assert.equal(state.endedAt, new Date(clockMs).toISOString());
+    const finishedElapsed = reducerModule.computeElapsedSeconds(state, clockMs);
+    assert.equal(finishedElapsed, 9, 'FINISH 시점의 경과 시간은 9초여야 한다(7s + 2s)');
+    clockMs += 100000; // 아주 오랜 시간이 지난 것처럼 시늉
+    assert.equal(reducerModule.computeElapsedSeconds(state, clockMs), finishedElapsed, 'FINISHED 이후 경과 시간은 고정돼야 하며 0으로 돌아가면 안 된다');
+    assert.notEqual(finishedElapsed, 0);
+
+    // 13-5. CANCELLED에서도 동일하게 고정된다(별도의 짧은 시나리오).
+    let cancelClockMs = T0;
+    let cancelState = withFixedDate(cancelClockMs, () => createDefaultDemoState());
+    cancelState = withFixedDate(cancelClockMs, () => demoReducer(cancelState, { type: 'TOGGLE_CANDIDATE', candidateId: cancelState.candidates[0].id }));
+    cancelState = withFixedDate(cancelClockMs, () => demoReducer(cancelState, { type: 'REGISTER' }));
+    cancelClockMs += 5000;
+    cancelState = withFixedDate(cancelClockMs, () => demoReducer(cancelState, { type: 'START_WATCHING' }));
+    cancelClockMs += 1000;
+    cancelState = withFixedDate(cancelClockMs, () => demoReducer(cancelState, { type: 'CANCEL' }));
+    assert.equal(cancelState.status, 'CANCELLED');
+    const cancelledElapsed = reducerModule.computeElapsedSeconds(cancelState, cancelClockMs);
+    assert.equal(cancelledElapsed, 6);
+    cancelClockMs += 50000;
+    assert.equal(reducerModule.computeElapsedSeconds(cancelState, cancelClockMs), cancelledElapsed, 'CANCELLED 이후에도 경과 시간이 고정돼야 한다');
+
+    // 13-6. 새로고침(=sessionStorage round-trip) 후에도 시작·종료 시각이
+    // 그대로 유지돼야 한다 -- 경과 시간이 복원 이후 다시 계산돼도 같은
+    // 값이 나와야 한다.
+    const { storage: refreshStorage } = makeFakeStorage();
+    storageModule.writeDemoState(refreshStorage, state);
+    const restoredAfterRefresh = storageModule.readDemoState(refreshStorage);
+    assert.ok(restoredAfterRefresh, '정상 저장된 FINISHED 상태는 복원돼야 한다');
+    assert.equal(restoredAfterRefresh.startedAt, state.startedAt);
+    assert.equal(restoredAfterRefresh.endedAt, state.endedAt);
+    assert.equal(reducerModule.computeElapsedSeconds(restoredAfterRefresh, clockMs), finishedElapsed, '새로고침 복원 후에도 경과 시간이 동일해야 한다');
+
+    // 13-7. RESTART_JOURNEY 이후 다음 감시는 새 시작 시각을 쓴다 -- 이전
+    // startedAt이 재사용되지 않는다.
+    const firstStartedAt = state.startedAt;
+    let restarted = withFixedDate(clockMs, () => demoReducer(state, { type: 'RESTART_JOURNEY' }));
+    assert.equal(restarted.status, 'READY');
+    assert.equal(restarted.startedAt, null, 'RESTART_JOURNEY 직후에는 startedAt이 다시 null이어야 한다');
+    assert.equal(restarted.endedAt, null);
+
+    clockMs += 20000; // 재시작 후 다음 감시를 시작하기까지 시간이 흘렀다고 가정
+    restarted = withFixedDate(clockMs, () => demoReducer(restarted, { type: 'REGISTER' }));
+    assert.equal(restarted.startedAt, new Date(clockMs).toISOString(), '재시작 후 REGISTER는 새 시각을 startedAt으로 써야 한다');
+    assert.notEqual(restarted.startedAt, firstStartedAt, '이전 startedAt을 그대로 재사용하면 안 된다');
+    assert.equal(reducerModule.computeElapsedSeconds(restarted, clockMs), 0, '새 시작 시각을 기준으로 경과 시간이 다시 0부터 시작해야 한다');
+  }
+
+  // -- 14. sessionStorage 스키마 검증 강화 ----------------------------------
+  {
+    // 14-1. 정상 상태는 어떤 진행 단계에서도 round-trip 가능해야 한다.
+    const readyBaseline = createDefaultDemoState();
+    for (const candidateState of [
+      readyBaseline,
+      dispatchAll(readyBaseline, [{ type: 'TOGGLE_CANDIDATE', candidateId: readyBaseline.candidates[0].id }, { type: 'REGISTER' }]),
+    ]) {
+      const { storage } = makeFakeStorage();
+      storageModule.writeDemoState(storage, candidateState);
+      assert.deepEqual(storageModule.readDemoState(storage), candidateState, '정상 상태는 손실 없이 round-trip 가능해야 한다');
+    }
+
+    const fullFlow = (() => {
+      let s = createDefaultDemoState();
+      const cid = s.candidates[0].id;
+      s = demoReducer(s, { type: 'TOGGLE_CANDIDATE', candidateId: cid });
+      s = demoReducer(s, { type: 'REGISTER' });
+      s = demoReducer(s, { type: 'START_WATCHING' });
+      s = demoReducer(s, { type: 'TICK' });
+      s = demoReducer(s, { type: 'TICK' });
+      s = demoReducer(s, { type: 'MARK_NOTIFIED' });
+      s = demoReducer(s, { type: 'FINISH' });
+      return s;
+    })();
+    {
+      const { storage } = makeFakeStorage();
+      storageModule.writeDemoState(storage, fullFlow);
+      assert.deepEqual(storageModule.readDemoState(storage), fullFlow, 'FINISHED 상태도 round-trip 가능해야 한다');
+    }
+
+    function expectRejectedAndCleared(payload, label) {
+      const { storage, backing } = makeFakeStorage();
+      backing.set(typesModule.DEMO_STORAGE_KEY, typeof payload === 'string' ? payload : JSON.stringify(payload));
+      const result = storageModule.readDemoState(storage);
+      assert.equal(result, null, `${label}: 검증에 실패해야 한다`);
+      assert.equal(backing.has(typesModule.DEMO_STORAGE_KEY), false, `${label}: 손상된 sessionStorage 항목은 삭제돼야 한다`);
+    }
+
+    function mutate(base, patch) {
+      return { ...JSON.parse(JSON.stringify(base)), ...patch };
+    }
+
+    const validReady = createDefaultDemoState();
+
+    // 14-2. status가 허용된 값이 아니면 거부.
+    expectRejectedAndCleared(mutate(validReady, { status: 'BOOKED' }), 'unknown status');
+
+    // 14-3/14-4. intervalSeconds: 숫자 1~5만 허용, 그 외 전부 거부.
+    for (const seconds of [1, 2, 3, 4, 5]) {
+      const { storage } = makeFakeStorage();
+      storageModule.writeDemoState(storage, mutate(validReady, { intervalSeconds: seconds }));
+      assert.ok(storageModule.readDemoState(storage), `intervalSeconds=${seconds}는 허용돼야 한다`);
+    }
+    for (const seconds of ['1', 0, 6, 2.5, null, [2], { seconds: 2 }, undefined, NaN]) {
+      expectRejectedAndCleared(mutate(validReady, { intervalSeconds: seconds }), `intervalSeconds=${JSON.stringify(seconds)}`);
+    }
+
+    // 14-5. watchTick: 0 이상의 제한된 정수만 허용.
+    expectRejectedAndCleared(mutate(validReady, { watchTick: -1 }), 'negative watchTick');
+    expectRejectedAndCleared(mutate(validReady, { watchTick: 1.5 }), 'non-integer watchTick');
+    expectRejectedAndCleared(mutate(validReady, { watchTick: '3' }), 'string watchTick');
+    expectRejectedAndCleared(mutate(validReady, { watchTick: 999999999 }), 'absurdly large watchTick');
+
+    // 14-6. 날짜/ISO 시각 값이 유효해야 한다.
+    expectRejectedAndCleared(mutate(validReady, { condition: { ...validReady.condition, date: '2026-13-40' } }), 'invalid calendar date');
+    expectRejectedAndCleared(mutate(validReady, { condition: { ...validReady.condition, date: '2026-02-30' } }), 'nonexistent calendar date (Feb 30)');
+    expectRejectedAndCleared(mutate(validReady, { createdAt: 'not-a-real-timestamp' }), 'invalid createdAt');
+
+    // 14-7. passengers: 허용 범위의 정수만.
+    for (const passengers of [0, 5, 2.5, '2', null]) {
+      expectRejectedAndCleared(mutate(validReady, { condition: { ...validReady.condition, passengers } }), `passengers=${JSON.stringify(passengers)}`);
+    }
+
+    // 14-8. 후보 ID 중복 거부.
+    const duplicatedCandidates = validReady.candidates.map((c, i) => (i === 1 ? { ...c, id: validReady.candidates[0].id } : c));
+    expectRejectedAndCleared(mutate(validReady, { candidates: duplicatedCandidates }), 'duplicate candidate ids');
+
+    // 14-9. 선택된 후보 ID가 실제 후보 목록에 존재해야 한다.
+    expectRejectedAndCleared(mutate(validReady, { selectedCandidateIds: ['no-such-candidate'] }), 'selected id not in candidates');
+
+    // 14-10. 발견된 후보(foundCandidateId)는 선택된 후보여야 한다 + 후보
+    // 상태 enum이 유효해야 한다.
+    const seatFoundState = (() => {
+      let s = createDefaultDemoState();
+      const cid = s.candidates[0].id;
+      s = demoReducer(s, { type: 'TOGGLE_CANDIDATE', candidateId: cid });
+      s = demoReducer(s, { type: 'REGISTER' });
+      s = demoReducer(s, { type: 'START_WATCHING' });
+      s = demoReducer(s, { type: 'TICK' });
+      s = demoReducer(s, { type: 'TICK' });
+      return s;
+    })();
+    assert.equal(seatFoundState.status, 'SEAT_FOUND');
+    expectRejectedAndCleared(mutate(seatFoundState, { foundCandidateId: seatFoundState.candidates[2].id }), 'foundCandidateId not among selectedCandidateIds');
+    expectRejectedAndCleared(
+      mutate(seatFoundState, { candidates: seatFoundState.candidates.map((c) => ({ ...c, status: 'BOOKED' })) }),
+      'invalid candidate status enum',
+    );
+
+    // 14-11. SEAT_FOUND/NOTIFIED/FINISHED는 foundCandidateId가 반드시 있어야 한다.
+    expectRejectedAndCleared(mutate(seatFoundState, { foundCandidateId: null }), 'SEAT_FOUND without foundCandidateId');
+
+    // 14-12. 시작/종료 시각 상태 조합이 모순되면 거부.
+    expectRejectedAndCleared(mutate(validReady, { startedAt: new Date().toISOString() }), 'READY with a non-null startedAt');
+    expectRejectedAndCleared(mutate(seatFoundState, { startedAt: null }), 'active status without startedAt');
+    expectRejectedAndCleared(mutate(fullFlow, { endedAt: null }), 'FINISHED without endedAt');
+    expectRejectedAndCleared(
+      mutate(fullFlow, { endedAt: new Date(new Date(fullFlow.startedAt).getTime() - 1000).toISOString() }),
+      'endedAt earlier than startedAt',
+    );
+
+    // 14-13. 배열이어야 하는 필드가 배열이 아니면 거부.
+    expectRejectedAndCleared(mutate(validReady, { candidates: {} }), 'candidates not an array');
+    expectRejectedAndCleared(mutate(validReady, { selectedCandidateIds: 'demo-candidate-1' }), 'selectedCandidateIds not an array');
+    expectRejectedAndCleared(mutate(validReady, { history: {} }), 'history not an array');
+    expectRejectedAndCleared(mutate(validReady, { notifications: 'oops' }), 'notifications not an array');
+
+    // 14-14. 파싱조차 안 되는 문자열도 삭제되고 null.
+    expectRejectedAndCleared('not even json{{{', 'unparsable JSON');
+    expectRejectedAndCleared({ not: 'a demo state at all' }, 'unrelated object shape');
+  }
+
+  // -- 15. 두 데모 기능의 문구 구분 -----------------------------------------
+  {
+    const pageSource = readSource('app/page.tsx');
+    const watchJobsSource = readSource('components/watch-jobs.tsx');
+    const demoShowcaseSource = readSource('components/demo/demo-showcase.tsx');
+
+    assert.equal(pageSource.includes('데모 체험'), false, 'app/page.tsx는 더 이상 "데모 체험"이라는 모호한 문구를 쓰면 안 된다');
+    assert.ok(pageSource.includes('샘플 시간표 보기'), 'app/page.tsx의 시간표 조회 모드 전환 버튼은 "샘플 시간표 보기"로 표기돼야 한다');
+    assert.ok(pageSource.includes('취소표 감시 가상 시연'), 'app/page.tsx의 /demo 링크는 "취소표 감시 가상 시연"으로 표기돼야 한다');
+    assert.ok(watchJobsSource.includes('취소표 감시 가상 시연'), 'components/watch-jobs.tsx의 /demo 링크도 동일한 문구를 써야 한다');
+    assert.ok(demoShowcaseSource.includes('취소표 감시 가상 시연'), '/demo 화면 자체도 같은 문구를 제목에 써야 한다');
+    // /demo 화면은 여전히 "실제 좌석 조회·예약·결제를 수행하지 않는다"는
+    // 취지를 상단에 상시 명시해야 한다(§상단 배지).
+    assert.ok(/실제 좌석 조회.*예약.*결제/.test(demoShowcaseSource), '/demo 상단 배지는 실제 좌석 조회·예약·결제를 수행하지 않음을 명시해야 한다');
   }
 
   // -- 10. scenarios/reducer 순수 로직 실행 중 fetch 호출 0회 ----------------
