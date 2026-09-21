@@ -1,7 +1,12 @@
 // Offline contract checks for the v0.5 auth + Seat Watch subsystem
-// (lib/auth/**, lib/watch/**, app/api/auth/**, app/api/devices, app/api/watch-jobs/**).
-// No production credentials, no external network calls -- every outcome
-// comes from lib/watch/mock-seat-provider.ts and the InMemory notification
+// (lib/auth/**, lib/watch/**, lib/security/**, app/api/auth/**, app/api/devices,
+// app/api/watch-jobs/**), including the security/correctness review round
+// (AUTH_STORE/WATCH_STORE fail-closed flags, cookie-only sessions with no
+// token in JSON, Origin/CSRF guard, account-deletion reauth, masked device
+// DTOs, channel-match validation, multi-channel/multi-device/re-watch
+// notification idempotency, and candidate id/externalKey validation). No
+// production credentials, no external network calls -- every outcome comes
+// from lib/watch/mock-seat-provider.ts and the InMemory notification
 // adapter. v0.3's schedule/station/fare suite (scripts/verify-rail.cjs) and
 // v0.4's reservation-job suite (scripts/verify-reservation.cjs) are not
 // duplicated here and must both still pass on their own.
@@ -11,27 +16,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
 const ts = require('typescript');
-const { NextRequest } = require('next/server');
+const { NextRequest, NextResponse } = require('next/server');
 const root = path.resolve(__dirname, '..');
 const loadedModules = new Map();
-
-// A minimal in-memory fake for next/headers's cookies() -- route handlers
-// invoked directly here (not through Next's real request pipeline) have no
-// AsyncLocalStorage request context, so the real cookies() would throw. This
-// fake only needs to satisfy lib/auth/session.ts's `(await cookies()).set/
-// .delete` calls; it is not used to assert any cookie behavior itself (that
-// would need a real browser/Next server, out of scope for this offline
-// script -- the JSON response bodies are asserted instead).
-function fakeNextHeaders() {
-  const jar = new Map();
-  return {
-    cookies: async () => ({
-      set: (name, value) => jar.set(name, value),
-      delete: (name) => jar.delete(name),
-      get: (name) => (jar.has(name) ? { value: jar.get(name) } : undefined),
-    }),
-  };
-}
 
 function load(relative) {
   const filename = path.join(root, relative);
@@ -43,11 +30,9 @@ function load(relative) {
   mod.require = (name) =>
     name === 'server-only'
       ? {}
-      : name === 'next/headers'
-        ? fakeNextHeaders()
-        : name.startsWith('@/')
-          ? load(name.slice(2) + '.ts')
-          : require(name);
+      : name.startsWith('@/')
+        ? load(name.slice(2) + '.ts')
+        : require(name);
   mod._compile(
     ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
@@ -72,6 +57,15 @@ const originalError = console.error;
 console.log = (...args) => { capturedLogs.push(args.map(String).join(' ')); };
 console.error = (...args) => { capturedLogs.push(args.map(String).join(' ')); };
 
+// AUTH_STORE/WATCH_STORE default to "disabled" (fail-closed) -- most
+// scenarios below need both set to "memory" to exercise the actual auth/
+// watch logic at all. NODE_ENV must also not be "production" for either to
+// be usable (see lib/auth/feature-flags.ts, lib/watch/feature-flags.ts).
+const DEV_STORES = { AUTH_STORE: 'memory', WATCH_STORE: 'memory' };
+
+const authSession = load('lib/auth/session.ts');
+const authMemoryStore = load('lib/auth/memory-store.ts');
+const { assertTrustedOrigin } = load('lib/security/origin-guard.ts');
 const { canTransition, hasExpired } = load('lib/watch/state-machine.ts');
 const { assertSimulationAllowed } = load('lib/watch/simulation-guard.ts');
 const watchStore = load('lib/watch/store.ts');
@@ -83,6 +77,7 @@ const signupRoute = load('app/api/auth/signup/route.ts');
 const loginRoute = load('app/api/auth/login/route.ts');
 const logoutRoute = load('app/api/auth/logout/route.ts');
 const sessionRoute = load('app/api/auth/session/route.ts');
+const authStatusRoute = load('app/api/auth/status/route.ts');
 const accountRoute = load('app/api/auth/account/route.ts');
 
 const devicesRoute = load('app/api/devices/route.ts');
@@ -95,6 +90,7 @@ const watchJobResumeRoute = load('app/api/watch-jobs/[id]/resume/route.ts');
 const providerStatusRoute = load('app/api/watch-jobs/provider-status/route.ts');
 
 function resetAll() {
+  authMemoryStore.__resetAuthStoreForTests();
   watchStore.__resetWatchStoreForTests();
   watchQueue.__resetQueueForTests();
   __resetInMemoryNotificationsForTests();
@@ -114,17 +110,52 @@ async function withEnv(vars, run) {
   }
 }
 
-function req(url, { method = 'GET', body, token, clientId = 'test-client' } = {}) {
-  const headers = { 'x-forwarded-for': clientId };
+// -- Cookie helpers ----------------------------------------------------------
+// lib/auth/session.ts no longer uses next/headers's cookies() (it writes
+// directly onto a NextResponse), so route handlers can be invoked exactly
+// like a real request/response cycle here -- no fake AsyncLocalStorage
+// context is needed any more. Session tokens are asserted from the real
+// Set-Cookie header, never read out of a JSON body (the JSON body must not
+// contain one at all -- see the assertions below).
+function extractSetCookieLines(response) {
+  if (typeof response.headers.getSetCookie === 'function') {
+    return response.headers.getSetCookie();
+  }
+  const single = response.headers.get('set-cookie');
+  return single ? [single] : [];
+}
+
+function extractCookieValue(response, name) {
+  for (const line of extractSetCookieLines(response)) {
+    const firstPair = line.split(';')[0];
+    const eq = firstPair.indexOf('=');
+    if (eq === -1) continue;
+    if (firstPair.slice(0, eq) === name) return firstPair.slice(eq + 1);
+  }
+  return null;
+}
+
+function req(url, { method = 'GET', body, cookie, clientId = 'test-client', origin, host } = {}) {
+  const parsedUrl = new URL(url);
+  const headers = { 'x-forwarded-for': clientId, host: host ?? parsedUrl.host };
   if (body !== undefined) headers['content-type'] = 'application/json';
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (cookie) headers.cookie = `${authSession.getSessionCookieName()}=${cookie}`;
+  if (origin !== undefined) headers.origin = origin;
   return new NextRequest(url, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
 }
 
 async function signup(email, clientId) {
   const res = await signupRoute.POST(req('http://test/api/auth/signup', { method: 'POST', body: { email, password: FAKE_PASSWORD }, clientId }));
   const payload = await res.json();
-  return { status: res.status, ...payload };
+  const cookie = extractCookieValue(res, authSession.getSessionCookieName());
+  return { status: res.status, cookie, raw: payload, ...payload };
+}
+
+async function login(email, password, clientId) {
+  const res = await loginRoute.POST(req('http://test/api/auth/login', { method: 'POST', body: { email, password }, clientId }));
+  const payload = await res.json();
+  const cookie = extractCookieValue(res, authSession.getSessionCookieName());
+  return { status: res.status, cookie, raw: payload, ...payload };
 }
 
 function baseJobInput(overrides = {}) {
@@ -139,7 +170,7 @@ function baseJobInput(overrides = {}) {
     trainType: 'KTX',
     passengers: 1,
     seatClassPreference: 'standard_preferred',
-    candidates: [{ id: 'cand-1', trainNumber: 'KTX 101', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }],
+    candidates: [{ externalKey: 'cand-1', trainNumber: 'KTX 101', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }],
     watchUntil: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
     notificationMethods: [],
     ...overrides,
@@ -175,45 +206,163 @@ async function main() {
     assert.throws(() => assertSimulationAllowed({ tick: 3, seatProvider: 'mock' }), { code: 'SIMULATION_NOT_ALLOWED' }, 'ENABLE_MOCK_SEAT_SIMULATION=false must reject even valid values');
   });
 
+  // === §1 검토사항: AUTH_STORE/WATCH_STORE fail-closed =========================
+
+  // Default (no AUTH_STORE set at all) must already block, even outside production.
   await withEnv({ NODE_ENV: 'test' }, async () => {
-    // -- auth: signup/login/session/logout, and missing/garbage tokens blocked --
+    resetAll();
+    const blockedByDefault = await signup('default-disabled@example.com', 'block-default-disabled');
+    assert.equal(blockedByDefault.status, 503);
+    assert.equal(blockedByDefault.raw.error.code, 'AUTH_STORE_DISABLED');
+    const statusRes = await authStatusRoute.GET();
+    assert.equal((await statusRes.json()).enabled, false);
+  });
+
+  // AUTH_STORE=memory usable outside production, but WATCH_STORE independently still disabled by default.
+  await withEnv({ NODE_ENV: 'test', AUTH_STORE: 'memory' }, async () => {
+    resetAll();
+    const user = await signup('watchdisabled@example.com', 'block-watchdisabled');
+    assert.equal(user.status, 201);
+    const statusRes = await authStatusRoute.GET();
+    assert.equal((await statusRes.json()).enabled, true);
+    const blockedDevice = await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'x@example.com' }, cookie: user.cookie, clientId: 'block-watchdisabled-device' }));
+    assert.equal(blockedDevice.status, 503);
+    assert.equal((await blockedDevice.json()).error.code, 'WATCH_STORE_DISABLED');
+  });
+
+  // Production: AUTH_STORE=memory must still be blocked (Vercel Serverless memory cannot be a real account store).
+  await withEnv({ NODE_ENV: 'production' }, async () => {
+    resetAll();
+    const blockedNoFlag = await signup('prod-auth-1@example.com', 'block-prod-auth-1');
+    assert.equal(blockedNoFlag.status, 503);
+    assert.equal(blockedNoFlag.raw.error.code, 'AUTH_STORE_DISABLED');
+  });
+  await withEnv({ NODE_ENV: 'production', AUTH_STORE: 'memory' }, async () => {
+    resetAll();
+    const blockedEvenWithMemory = await signup('prod-auth-2@example.com', 'block-prod-auth-2');
+    assert.equal(blockedEvenWithMemory.status, 503, 'AUTH_STORE=memory must still be blocked in production');
+    assert.equal(blockedEvenWithMemory.raw.error.code, 'AUTH_STORE_DISABLED');
+  });
+
+  // Production: WATCH_STORE=memory must still block job creation/device registration.
+  await withEnv({ NODE_ENV: 'production', SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', WATCH_STORE: 'memory' }, async () => {
+    resetAll();
+    const blockedCreate = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'fcm', deviceId: 'irrelevant' }] }), clientId: 'block-prod-watch-create' }));
+    assert.equal(blockedCreate.status, 503);
+    assert.equal((await blockedCreate.json()).error.code, 'JOBS_DISABLED');
+
+    const blockedDevice = await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'x@example.com' }, clientId: 'block-prod-watch-device' }));
+    assert.equal(blockedDevice.status, 503);
+    assert.equal((await blockedDevice.json()).error.code, 'WATCH_STORE_DISABLED');
+  });
+
+  // === §2 검토사항: 세션 토큰이 JSON에 노출되지 않음 + §9 세션 고정 방지 ==========
+
+  await withEnv({ ...DEV_STORES, NODE_ENV: 'test' }, async () => {
     resetAll();
     const signedUp = await signup('user-a@example.com', 'block-signup-a');
     assert.equal(signedUp.status, 201);
-    assert.ok(signedUp.token);
-    const tokenA = signedUp.token;
+    assert.equal('token' in signedUp.raw, false, 'signup JSON must never contain the session token');
+    assert.ok(signedUp.cookie, 'the session token must still be delivered via Set-Cookie');
+    const tokenA = signedUp.cookie;
 
     const dup = await signup('user-a@example.com', 'block-signup-a');
     assert.equal(dup.status, 409);
-    assert.equal(dup.error.code, 'EMAIL_TAKEN');
+    assert.equal(dup.raw.error.code, 'EMAIL_TAKEN');
 
-    const badLogin = await loginRoute.POST(req('http://test/api/auth/login', { method: 'POST', body: { email: 'user-a@example.com', password: 'wrong-password' }, clientId: 'block-login-a' }));
+    const badLogin = await login('user-a@example.com', 'wrong-password', 'block-login-a');
     assert.equal(badLogin.status, 401);
-    assert.equal((await badLogin.json()).error.code, 'INVALID_CREDENTIALS');
+    assert.equal(badLogin.raw.error.code, 'INVALID_CREDENTIALS');
 
-    const goodLogin = await loginRoute.POST(req('http://test/api/auth/login', { method: 'POST', body: { email: 'user-a@example.com', password: FAKE_PASSWORD }, clientId: 'block-login-a' }));
+    const goodLogin = await login('user-a@example.com', FAKE_PASSWORD, 'block-login-a');
     assert.equal(goodLogin.status, 200);
+    assert.equal('token' in goodLogin.raw, false, 'login JSON must never contain the session token');
+    assert.notEqual(goodLogin.cookie, tokenA, '로그인 성공 시 항상 새 세션을 발급해야 한다(세션 고정 방지)');
 
-    const sessionOk = await sessionRoute.GET(req('http://test/api/auth/session', { token: tokenA }));
+    const sessionOk = await sessionRoute.GET(req('http://test/api/auth/session', { cookie: goodLogin.cookie }));
     assert.equal(sessionOk.status, 200);
     assert.equal((await sessionOk.json()).user.email, 'user-a@example.com');
+    assert.equal(sessionOk.headers.get('cache-control'), 'no-store');
 
     const sessionMissing = await sessionRoute.GET(req('http://test/api/auth/session'));
     assert.equal(sessionMissing.status, 401);
     assert.equal((await sessionMissing.json()).error.code, 'UNAUTHENTICATED');
 
-    const sessionGarbage = await sessionRoute.GET(req('http://test/api/auth/session', { token: 'not-a-real-token' }));
+    const sessionGarbage = await sessionRoute.GET(req('http://test/api/auth/session', { cookie: 'not-a-real-token' }));
     assert.equal(sessionGarbage.status, 401);
     assert.equal((await sessionGarbage.json()).error.code, 'SESSION_EXPIRED');
 
-    await logoutRoute.POST(req('http://test/api/auth/logout', { method: 'POST', token: tokenA }));
-    const afterLogout = await sessionRoute.GET(req('http://test/api/auth/session', { token: tokenA }));
+    await logoutRoute.POST(req('http://test/api/auth/logout', { method: 'POST', cookie: goodLogin.cookie }));
+    const afterLogout = await sessionRoute.GET(req('http://test/api/auth/session', { cookie: goodLogin.cookie }));
     assert.equal(afterLogout.status, 401, 'logout must actually revoke the session, not just clear the cookie client-side');
   });
 
+  // Cookie attributes: httpOnly/SameSite=Lax/Path=/, and only Production gets Secure + the __Host- name prefix.
+  await withEnv({ NODE_ENV: 'test' }, () => {
+    const res = NextResponse.json({});
+    authSession.setSessionCookie(res, 'fixture-token-dev', new Date(Date.now() + 60_000).toISOString());
+    const setCookie = extractSetCookieLines(res)[0];
+    assert.ok(setCookie.startsWith('railflow_session=fixture-token-dev'));
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /SameSite=Lax/i);
+    assert.match(setCookie, /Path=\//i);
+    assert.doesNotMatch(setCookie, /Secure/i, '개발 환경(http)에서는 Secure를 강제하면 안 된다');
+  });
+  await withEnv({ NODE_ENV: 'production' }, () => {
+    const res = NextResponse.json({});
+    authSession.setSessionCookie(res, 'fixture-token-prod', new Date(Date.now() + 60_000).toISOString());
+    const setCookie = extractSetCookieLines(res)[0];
+    assert.ok(setCookie.startsWith('__Host-railflow_session=fixture-token-prod'), 'production은 __Host- 접두사를 써야 한다');
+    assert.match(setCookie, /Secure/i);
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /SameSite=Lax/i);
+    assert.match(setCookie, /Path=\//i);
+  });
+
+  // === §3 검토사항: CSRF/Origin 검증 + 계정삭제 재인증 ===========================
+
+  await withEnv({ NODE_ENV: 'production' }, () => {
+    assert.doesNotThrow(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'http://test' })), 'Origin이 Host와 일치하면 허용');
+    assert.throws(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'http://evil.example' })), { code: 'FORBIDDEN_ORIGIN' }, '다른 Origin은 거부');
+    assert.throws(() => assertTrustedOrigin(req('http://test/api/x')), { code: 'FORBIDDEN_ORIGIN' }, 'Origin 누락은 허용이 아니라 거부');
+  });
+  await withEnv({ NODE_ENV: 'test' }, () => {
+    assert.doesNotThrow(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'http://evil.example' })), '개발/테스트 환경에서는 Origin을 강제하지 않는다');
+  });
+
+  // Full-route integration: /api/auth/logout has no store-disabled short-circuit
+  // ahead of the Origin check, so it is reachable end-to-end even in production.
+  await withEnv({ NODE_ENV: 'production' }, async () => {
+    const forged = await logoutRoute.POST(req('http://test/api/auth/logout', { method: 'POST', origin: 'http://evil.example', clientId: 'block-csrf-bad' }));
+    assert.equal(forged.status, 403);
+    assert.equal((await forged.json()).error.code, 'FORBIDDEN_ORIGIN');
+
+    const trusted = await logoutRoute.POST(req('http://test/api/auth/logout', { method: 'POST', origin: 'http://test', clientId: 'block-csrf-ok' }));
+    assert.equal(trusted.status, 200, '일치하는 Origin은 production에서도 통과해야 한다');
+  });
+
+  await withEnv({ ...DEV_STORES, NODE_ENV: 'test' }, async () => {
+    resetAll();
+    const user = await signup('reauth@example.com', 'block-reauth');
+    assert.equal(user.status, 201);
+
+    const noPassword = await accountRoute.DELETE(req('http://test/api/auth/account', { method: 'DELETE', cookie: user.cookie, clientId: 'block-reauth-np' }));
+    assert.equal(noPassword.status, 400);
+
+    const wrongPassword = await accountRoute.DELETE(req('http://test/api/auth/account', { method: 'DELETE', body: { password: 'wrong-one' }, cookie: user.cookie, clientId: 'block-reauth-wp' }));
+    assert.equal(wrongPassword.status, 401);
+    assert.equal((await wrongPassword.json()).error.code, 'REAUTH_REQUIRED');
+
+    const stillLoggedIn = await sessionRoute.GET(req('http://test/api/auth/session', { cookie: user.cookie }));
+    assert.equal(stillLoggedIn.status, 200, '재인증 실패는 계정을 삭제해서는 안 된다');
+
+    const rightPassword = await accountRoute.DELETE(req('http://test/api/auth/account', { method: 'DELETE', body: { password: FAKE_PASSWORD }, cookie: user.cookie, clientId: 'block-reauth-ok' }));
+    assert.equal(rightPassword.status, 200);
+  });
+
   // -- authentication is required on every watch-job/device route --
-  resetAll();
-  await withEnv({ SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
+  await withEnv({ ...DEV_STORES, SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
+    resetAll();
     const noAuthCreate = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput(), clientId: 'block-noauth' }));
     assert.equal(noAuthCreate.status, 401);
     const noAuthList = await watchJobsRoute.GET(req('http://test/api/watch-jobs'));
@@ -224,67 +373,131 @@ async function main() {
     assert.equal(noAuthDetail.status, 401);
   });
 
-  await withEnv({ SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', ENABLE_MOCK_SEAT_SIMULATION: 'true', NODE_ENV: 'test' }, async () => {
+  await withEnv({ ...DEV_STORES, SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', ENABLE_MOCK_SEAT_SIMULATION: 'true', NODE_ENV: 'test' }, async () => {
     // -- user isolation + wrong/nonexistent job id access --
     resetAll();
     const userA = await signup('isolate-a@example.com', 'block-isolate');
     const userB = await signup('isolate-b@example.com', 'block-isolate');
 
-    const deviceA = await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'a@example.com' }, token: userA.token, clientId: 'block-device' }));
+    const deviceA = await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'a@example.com' }, cookie: userA.cookie, clientId: 'block-device' }));
     const deviceAJson = await deviceA.json();
+    assert.equal('token' in deviceAJson.device, false, '§5 검토사항: Device API는 원문 token을 절대 반환하지 않는다');
+    assert.ok(deviceAJson.device.maskedDestination.includes('•'));
+    assert.equal(deviceAJson.device.verified, false, 'email은 소유권 확인 전까지 unverified다');
 
-    const createA = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'email', deviceId: deviceAJson.device.id }] }), token: userA.token, clientId: 'block-create-a' }));
+    const createA = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'email', deviceId: deviceAJson.device.id }] }), cookie: userA.cookie, clientId: 'block-create-a' }));
     assert.equal(createA.status, 201);
     const jobA = (await createA.json()).job;
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    assert.ok(uuidRe.test(jobA.candidates[0].id), '§7 검토사항: candidate.id는 서버 생성 UUID여야 한다');
+    assert.equal(jobA.candidates[0].externalKey, 'cand-1');
 
-    const listB = await watchJobsRoute.GET(req('http://test/api/watch-jobs', { token: userB.token }));
+    const listB = await watchJobsRoute.GET(req('http://test/api/watch-jobs', { cookie: userB.cookie }));
     assert.equal((await listB.json()).jobs.length, 0, "user B's job list must not include user A's job");
 
-    const detailByB = await watchJobDetailRoute.GET(req(`http://test/api/watch-jobs/${jobA.id}`, { token: userB.token }), { params: Promise.resolve({ id: jobA.id }) });
+    const detailByB = await watchJobDetailRoute.GET(req(`http://test/api/watch-jobs/${jobA.id}`, { cookie: userB.cookie }), { params: Promise.resolve({ id: jobA.id }) });
     assert.equal(detailByB.status, 404, "another user's real job id must read exactly like a nonexistent one");
 
-    const randomId = await watchJobDetailRoute.GET(req('http://test/api/watch-jobs/does-not-exist', { token: userA.token }), { params: Promise.resolve({ id: 'does-not-exist' }) });
+    const randomId = await watchJobDetailRoute.GET(req('http://test/api/watch-jobs/does-not-exist', { cookie: userA.cookie }), { params: Promise.resolve({ id: 'does-not-exist' }) });
     assert.equal(randomId.status, 404);
 
-    const cancelByB = await watchJobCancelRoute.POST(req(`http://test/api/watch-jobs/${jobA.id}/cancel`, { method: 'POST', token: userB.token, clientId: 'block-cancel-b' }), { params: Promise.resolve({ id: jobA.id }) });
+    const cancelByB = await watchJobCancelRoute.POST(req(`http://test/api/watch-jobs/${jobA.id}/cancel`, { method: 'POST', cookie: userB.cookie, clientId: 'block-cancel-b' }), { params: Promise.resolve({ id: jobA.id }) });
     assert.equal(cancelByB.status, 404, "user B must not be able to cancel user A's job");
 
     // -- duplicate watch prevention --
-    const dupCreate = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'email', deviceId: deviceAJson.device.id }] }), token: userA.token, clientId: 'block-create-a' }));
+    const dupCreate = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'email', deviceId: deviceAJson.device.id }] }), cookie: userA.cookie, clientId: 'block-create-a' }));
     assert.equal(dupCreate.status, 409);
     assert.equal((await dupCreate.json()).error.code, 'DUPLICATE_JOB');
 
+    // -- notification channel/device mismatch rejected (§5) --
+    const mismatch = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ departureId: 'demo-2', notificationMethods: [{ channel: 'telegram', deviceId: deviceAJson.device.id }] }), cookie: userA.cookie, clientId: 'block-mismatch' }));
+    assert.equal(mismatch.status, 400);
+    assert.equal((await mismatch.json()).error.code, 'NOTIFICATION_CHANNEL_MISMATCH');
+
     // -- cancel + re-cancel rejected --
-    const cancelA = await watchJobCancelRoute.POST(req(`http://test/api/watch-jobs/${jobA.id}/cancel`, { method: 'POST', token: userA.token, clientId: 'block-cancel-a' }), { params: Promise.resolve({ id: jobA.id }) });
+    const cancelA = await watchJobCancelRoute.POST(req(`http://test/api/watch-jobs/${jobA.id}/cancel`, { method: 'POST', cookie: userA.cookie, clientId: 'block-cancel-a' }), { params: Promise.resolve({ id: jobA.id }) });
     assert.equal(cancelA.status, 200);
     assert.equal((await cancelA.json()).job.status, 'CANCELLED');
-    const reCancel = await watchJobCancelRoute.POST(req(`http://test/api/watch-jobs/${jobA.id}/cancel`, { method: 'POST', token: userA.token, clientId: 'block-cancel-a' }), { params: Promise.resolve({ id: jobA.id }) });
+    const reCancel = await watchJobCancelRoute.POST(req(`http://test/api/watch-jobs/${jobA.id}/cancel`, { method: 'POST', cookie: userA.cookie, clientId: 'block-cancel-a' }), { params: Promise.resolve({ id: jobA.id }) });
     assert.equal(reCancel.status, 409);
 
     // Cancelling frees the dedupe key for a fresh job with the same route/date/passengers.
-    const afterCancelCreate = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'email', deviceId: deviceAJson.device.id }] }), token: userA.token, clientId: 'block-create-a2' }));
+    const afterCancelCreate = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'email', deviceId: deviceAJson.device.id }] }), cookie: userA.cookie, clientId: 'block-create-a2' }));
     assert.equal(afterCancelCreate.status, 201);
   });
 
-  await withEnv({ SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', ENABLE_MOCK_SEAT_SIMULATION: 'true', NODE_ENV: 'test' }, async () => {
-    // -- full state transition + Mock seat-found + notification flow, via the
-    // real API routes (not the internal store) --
+  // === §7 검토사항: 후보 열차 검증(중복 externalKey, 날짜/시간범위 불일치, 도착<출발) ===
+  await withEnv({ ...DEV_STORES, SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
+    resetAll();
+    const user = await signup('candidate-validate@example.com', 'block-cand');
+    const deviceRes = await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'fcm', token: 'fcm-token-1' }, cookie: user.cookie, clientId: 'block-cand-device' }));
+    const device = (await deviceRes.json()).device;
+    assert.equal(device.verified, true, 'fcm은 등록 즉시 verified여야 한다');
+
+    const create = (candidates, clientId) =>
+      watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ candidates, notificationMethods: [{ channel: 'fcm', deviceId: device.id }] }), cookie: user.cookie, clientId }));
+
+    const dupExternalKey = await create(
+      [
+        { externalKey: 'dup', trainNumber: 'KTX 1', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' },
+        { externalKey: 'dup', trainNumber: 'KTX 2', trainType: 'KTX', departAt: '2026-09-26T11:00:00+09:00', arriveAt: '2026-09-26T13:00:00+09:00' },
+      ],
+      'block-cand-dup',
+    );
+    assert.equal(dupExternalKey.status, 400);
+    assert.equal((await dupExternalKey.json()).error.code, 'INVALID_CANDIDATE');
+
+    const wrongDate = await create([{ externalKey: 'wrong-date', trainNumber: 'KTX 3', trainType: 'KTX', departAt: '2026-09-27T10:00:00+09:00', arriveAt: '2026-09-27T12:00:00+09:00' }], 'block-cand-date');
+    assert.equal(wrongDate.status, 400);
+    assert.equal((await wrongDate.json()).error.code, 'INVALID_CANDIDATE');
+
+    const outsideRange = await create([{ externalKey: 'outside-range', trainNumber: 'KTX 4', trainType: 'KTX', departAt: '2026-09-26T05:00:00+09:00', arriveAt: '2026-09-26T07:00:00+09:00' }], 'block-cand-range');
+    assert.equal(outsideRange.status, 400);
+    assert.equal((await outsideRange.json()).error.code, 'INVALID_CANDIDATE');
+
+    const backwardsTime = await create([{ externalKey: 'backwards', trainNumber: 'KTX 5', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T09:00:00+09:00' }], 'block-cand-backwards');
+    assert.equal(backwardsTime.status, 400);
+    assert.equal((await backwardsTime.json()).error.code, 'INVALID_CANDIDATE');
+
+    // A valid set still succeeds, and a client-supplied "id" is ignored -- the
+    // server always generates its own UUID.
+    const validCreate = await create([{ id: 'client-supplied-fake-id', externalKey: 'valid-1', trainNumber: 'KTX 6', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }], 'block-cand-valid');
+    assert.equal(validCreate.status, 201);
+    const validJob = (await validCreate.json()).job;
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    assert.ok(uuidRe.test(validJob.candidates[0].id));
+    assert.notEqual(validJob.candidates[0].id, 'client-supplied-fake-id', 'candidate.id must never be client-controlled');
+    assert.equal(validJob.candidates[0].externalKey, 'valid-1');
+  });
+
+  // === §6 검토사항: 멱등키(channel+deviceId+watchCycle), 다중 채널/기기, 미확인 수신처 스킵, 재감시 후 새 알림 ===
+  await withEnv({ ...DEV_STORES, SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', ENABLE_MOCK_SEAT_SIMULATION: 'true', NODE_ENV: 'test' }, async () => {
     resetAll();
     const user = await signup('flow@example.com', 'block-flow');
-    const deviceRes = await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'flow@example.com' }, token: user.token, clientId: 'block-flow-device' }));
-    const device = (await deviceRes.json()).device;
+
+    const fcmDevice = (await (await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'fcm', token: 'fcm-flow-token' }, cookie: user.cookie, clientId: 'block-flow-device-fcm' }))).json()).device;
+    const webpushDevice = (await (await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'webpush', token: 'webpush-flow-token' }, cookie: user.cookie, clientId: 'block-flow-device-webpush' }))).json()).device;
+    const emailDevice = (await (await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'flow@example.com' }, cookie: user.cookie, clientId: 'block-flow-device-email' }))).json()).device;
+    assert.equal(fcmDevice.verified, true);
+    assert.equal(webpushDevice.verified, true);
+    assert.equal(emailDevice.verified, false, '이메일은 소유권 확인 전까지 unverified');
 
     const createRes = await watchJobsRoute.POST(
       req('http://test/api/watch-jobs', {
         method: 'POST',
         body: baseJobInput({
+          timeRangeStart: '07:00',
           candidates: [
-            { id: 'never', trainNumber: 'KTX 900', trainType: 'KTX', departAt: '2026-09-26T08:00:00+09:00', arriveAt: '2026-09-26T10:00:00+09:00', mockScenario: 'no_seat_ever' },
-            { id: 'appears', trainNumber: 'KTX 901', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00', mockScenario: 'seat_after_one_check' },
+            { externalKey: 'never', trainNumber: 'KTX 900', trainType: 'KTX', departAt: '2026-09-26T08:00:00+09:00', arriveAt: '2026-09-26T10:00:00+09:00', mockScenario: 'no_seat_ever' },
+            { externalKey: 'appears', trainNumber: 'KTX 901', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00', mockScenario: 'seat_after_one_check' },
           ],
-          notificationMethods: [{ channel: 'email', deviceId: device.id }],
+          notificationMethods: [
+            { channel: 'fcm', deviceId: fcmDevice.id },
+            { channel: 'webpush', deviceId: webpushDevice.id },
+            { channel: 'email', deviceId: emailDevice.id },
+          ],
         }),
-        token: user.token,
+        cookie: user.cookie,
         clientId: 'block-flow-create',
       }),
     );
@@ -292,10 +505,11 @@ async function main() {
     const job = (await createRes.json()).job;
     assert.equal(job.status, 'REGISTERED');
     assert.equal(job.simulation, true);
+    assert.equal(job.watchCycle, 0);
 
     const tick = async (n) => {
       const res = await watchJobSimulateRoute.POST(
-        req(`http://test/api/watch-jobs/${job.id}/simulate`, { method: 'POST', body: { idempotencyKey: crypto.randomUUID(), tick: n }, token: user.token, clientId: 'block-flow-sim' }),
+        req(`http://test/api/watch-jobs/${job.id}/simulate`, { method: 'POST', body: { idempotencyKey: crypto.randomUUID(), tick: n }, cookie: user.cookie, clientId: 'block-flow-sim' }),
         { params: Promise.resolve({ id: job.id }) },
       );
       assert.equal(res.status, 200, `tick must succeed: ${JSON.stringify(await res.clone().json())}`);
@@ -309,34 +523,66 @@ async function main() {
     assert.equal(state.attempts, 1);
     state = await tick(3); // checks "appears", attempts>=1 -> available -> SEAT_FOUND
     assert.equal(state.status, 'SEAT_FOUND');
-    assert.equal(state.foundCandidateId, 'appears', "once a candidate is found, the job stops watching the others");
+    const foundCandidateExternalKey = state.candidates.find((c) => c.id === state.foundCandidateId)?.externalKey;
+    assert.equal(foundCandidateExternalKey, 'appears', 'once a candidate is found, the job stops watching the others');
 
-    const deliveries = watchStore.listNotificationDeliveries(user.user.id, job.id);
-    assert.equal(deliveries.filter((d) => d.eventType === 'seat_found' && d.status === 'delivered').length, 1, 'exactly one seat_found notification must be delivered');
-    assert.equal(listInMemoryDeliveries().length, 1, 'the InMemory adapter must have been called exactly once');
+    let deliveries = watchStore.listNotificationDeliveries(user.user.id, job.id);
+    const cycle0SeatFound = deliveries.filter((d) => d.eventType === 'seat_found' && d.watchCycle === 0);
+    assert.equal(cycle0SeatFound.filter((d) => d.status === 'delivered').length, 2, '§6: fcm/webpush 각 기기가 한 번씩 알림을 받아야 한다');
+    assert.equal(new Set(cycle0SeatFound.filter((d) => d.status === 'delivered').map((d) => d.deviceId)).size, 2, '서로 다른 기기여야 한다');
+    assert.equal(cycle0SeatFound.filter((d) => d.status === 'skipped_unverified').length, 1, '§5: 미확인 이메일 수신처는 실제 발송하지 않는다');
+    assert.equal(listInMemoryDeliveries().length, 2, '어댑터는 verified 기기 수만큼만 실제로 호출돼야 한다');
 
-    // -- "다시 감시" then re-drive to SEAT_FOUND and "예매 완료" --
-    const resumed = await watchJobResumeRoute.POST(req(`http://test/api/watch-jobs/${job.id}/resume`, { method: 'POST', token: user.token, clientId: 'block-flow-resume' }), { params: Promise.resolve({ id: job.id }) });
-    assert.equal((await resumed.json()).job.status, 'WATCHING');
+    // Reprocessing the exact same event for the same device/channel/cycle must not double-send.
+    const fcmMethodKey = `${job.id}:${state.foundCandidateId}:seat_found:fcm:${fcmDevice.id}:0`;
+    const replay = await dispatchNotification({
+      userId: user.user.id, watchJobId: job.id, candidateId: state.foundCandidateId, channel: 'fcm', deviceId: fcmDevice.id, watchCycle: 0,
+      eventType: 'seat_found', idempotencyKey: fcmMethodKey, destination: fcmDevice.token, deviceVerified: true, title: 't', body: 'b',
+    });
+    assert.equal(replay.status, 'skipped_duplicate', '§6: 같은 채널·같은 기기·같은 세대의 완전한 중복은 걸러져야 한다');
+    assert.equal(listInMemoryDeliveries().length, 2, '중복 재처리는 어댑터를 다시 호출하면 안 된다');
+
+    // -- "다시 감시" then re-drive to SEAT_FOUND: a NEW notification must go out (§6 재감시 요구사항) --
+    const resumed = await watchJobResumeRoute.POST(req(`http://test/api/watch-jobs/${job.id}/resume`, { method: 'POST', cookie: user.cookie, clientId: 'block-flow-resume' }), { params: Promise.resolve({ id: job.id }) });
+    const resumedJob = (await resumed.json()).job;
+    assert.equal(resumedJob.status, 'WATCHING');
+    assert.equal(resumedJob.watchCycle, 1, '다시 감시는 watchCycle을 증가시켜야 한다');
 
     state = await tick(4); // "never" again -> WATCHING
-    state = await tick(5); // "appears" again -> SEAT_FOUND (a *second* logical seat_found event)
+    state = await tick(5); // "appears" again -> SEAT_FOUND (a *second* logical seat_found event, new generation)
     assert.equal(state.status, 'SEAT_FOUND');
+    assert.equal(state.watchCycle, 1);
 
-    const confirmRes = await watchJobConfirmRoute.POST(req(`http://test/api/watch-jobs/${job.id}/confirm-booking`, { method: 'POST', token: user.token, clientId: 'block-flow-confirm' }), { params: Promise.resolve({ id: job.id }) });
+    deliveries = watchStore.listNotificationDeliveries(user.user.id, job.id);
+    const cycle1SeatFound = deliveries.filter((d) => d.eventType === 'seat_found' && d.watchCycle === 1);
+    assert.equal(cycle1SeatFound.filter((d) => d.status === 'delivered').length, 2, '재감시 이후 같은 후보가 다시 발견되면 새 알림이 나가야 한다(이전 세대와 겹치지 않음)');
+    assert.equal(listInMemoryDeliveries().length, 4, '누적 실제 발송 횟수: 1세대 2건 + 2세대 2건');
+
+    const confirmRes = await watchJobConfirmRoute.POST(req(`http://test/api/watch-jobs/${job.id}/confirm-booking`, { method: 'POST', cookie: user.cookie, clientId: 'block-flow-confirm' }), { params: Promise.resolve({ id: job.id }) });
     assert.equal(confirmRes.status, 200);
     assert.equal((await confirmRes.json()).job.status, 'COMPLETED');
 
-    const reConfirm = await watchJobConfirmRoute.POST(req(`http://test/api/watch-jobs/${job.id}/confirm-booking`, { method: 'POST', token: user.token, clientId: 'block-flow-confirm' }), { params: Promise.resolve({ id: job.id }) });
+    const reConfirm = await watchJobConfirmRoute.POST(req(`http://test/api/watch-jobs/${job.id}/confirm-booking`, { method: 'POST', cookie: user.cookie, clientId: 'block-flow-confirm' }), { params: Promise.resolve({ id: job.id }) });
     assert.equal(reConfirm.status, 409, 'confirming an already-COMPLETED job must be rejected, not silently repeat');
+
+    // -- Device API list must never leak raw destinations, in JSON or via a naive string scan --
+    const deviceListRes = await devicesRoute.GET(req('http://test/api/devices', { cookie: user.cookie }));
+    const deviceListJson = await deviceListRes.json();
+    for (const d of deviceListJson.devices) assert.equal('token' in d, false);
+    const rawDump = JSON.stringify(deviceListJson);
+    assert.equal(rawDump.includes('fcm-flow-token'), false);
+    assert.equal(rawDump.includes('webpush-flow-token'), false);
+    assert.equal(rawDump.includes('flow@example.com'), false, '이메일 원문도 목록 JSON에 있으면 안 된다');
+    const auditDump = JSON.stringify(watchStore.listAuditEvents(user.user.id));
+    assert.equal(auditDump.includes('fcm-flow-token'), false, '감사 로그에도 원문 토큰이 있으면 안 된다');
   });
 
-  await withEnv({ SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
+  await withEnv({ ...DEV_STORES, SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
     // -- error scenario: error_on_check surfaces a structured error, watching continues --
     resetAll();
     const user = await signup('err@example.com', 'block-err');
     const jobId = watchStore.createWatchJob(
-      { ...baseJobInput(), userId: user.user.id, candidates: [{ id: 'x', trainNumber: 'KTX 2', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00', mockScenario: 'error_on_check' }] },
+      { ...baseJobInput(), userId: user.user.id, candidates: [{ externalKey: 'x', trainNumber: 'KTX 2', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00', mockScenario: 'error_on_check' }] },
       'mock',
     ).id;
     const worker = load('lib/watch/worker.ts');
@@ -348,8 +594,8 @@ async function main() {
   });
 
   // -- expiry is persisted (not thrown), and a replay is a total no-op --
-  resetAll();
-  await withEnv({ SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
+  await withEnv({ ...DEV_STORES, SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
+    resetAll();
     const user = await signup('expire@example.com', 'block-expire');
     const worker = load('lib/watch/worker.ts');
     const job = watchStore.createWatchJob({ ...baseJobInput(), userId: user.user.id, watchUntil: new Date(Date.now() + 150).toISOString() }, 'mock');
@@ -365,8 +611,8 @@ async function main() {
   });
 
   // -- PROVIDER_UNAVAILABLE is a real, honest state, and resumes once a provider connects --
-  resetAll();
-  await withEnv({ SEAT_AVAILABILITY_PROVIDER: 'disabled', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
+  await withEnv({ ...DEV_STORES, SEAT_AVAILABILITY_PROVIDER: 'disabled', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
+    resetAll();
     const user = await signup('unavail@example.com', 'block-unavail');
     const worker = load('lib/watch/worker.ts');
     const job = watchStore.createWatchJob({ ...baseJobInput(), userId: user.user.id }, 'unavailable');
@@ -385,16 +631,16 @@ async function main() {
   });
 
   // -- notification retry-on-failure + idempotency-on-success --
-  resetAll();
-  await withEnv({ NODE_ENV: 'test' }, async () => {
+  await withEnv({ ...DEV_STORES, NODE_ENV: 'test' }, async () => {
+    resetAll();
     const user = await signup('notif@example.com', 'block-notif');
     const jobId = watchStore.createWatchJob({ ...baseJobInput(), userId: user.user.id }, 'mock').id;
     const key = 'retry-idem-test';
 
     await withEnv({ NODE_ENV: 'production' }, async () => {
       const failed = await dispatchNotification({
-        userId: user.user.id, watchJobId: jobId, candidateId: null, channel: 'email', eventType: 'seat_found',
-        idempotencyKey: key, destination: 'notif@example.com', title: 't', body: 'b',
+        userId: user.user.id, watchJobId: jobId, candidateId: null, channel: 'email', deviceId: 'device-x', watchCycle: 0, eventType: 'seat_found',
+        idempotencyKey: key, destination: 'notif@example.com', deviceVerified: true, title: 't', body: 'b',
       });
       assert.equal(failed.status, 'failed', 'no real channel is configured in production, so the first attempt must fail closed');
     });
@@ -402,64 +648,76 @@ async function main() {
     assert.equal(watchStore.hasDeliveredNotification(user.user.id, key), false, 'a failed attempt must not be treated as delivered');
 
     const delivered = await dispatchNotification({
-      userId: user.user.id, watchJobId: jobId, candidateId: null, channel: 'email', eventType: 'seat_found',
-      idempotencyKey: key, destination: 'notif@example.com', title: 't', body: 'b',
+      userId: user.user.id, watchJobId: jobId, candidateId: null, channel: 'email', deviceId: 'device-x', watchCycle: 0, eventType: 'seat_found',
+      idempotencyKey: key, destination: 'notif@example.com', deviceVerified: true, title: 't', body: 'b',
     });
     assert.equal(delivered.status, 'delivered', 'the same idempotencyKey must be retryable after a failure, and now succeeds (dev/test uses the InMemory adapter)');
 
     const dupe = await dispatchNotification({
-      userId: user.user.id, watchJobId: jobId, candidateId: null, channel: 'email', eventType: 'seat_found',
-      idempotencyKey: key, destination: 'notif@example.com', title: 't', body: 'b',
+      userId: user.user.id, watchJobId: jobId, candidateId: null, channel: 'email', deviceId: 'device-x', watchCycle: 0, eventType: 'seat_found',
+      idempotencyKey: key, destination: 'notif@example.com', deviceVerified: true, title: 't', body: 'b',
     });
     assert.equal(dupe.status, 'skipped_duplicate', 'a second delivery attempt with the same key after success must not resend');
     assert.equal(listInMemoryDeliveries().length, 1, 'the adapter itself must only ever have been invoked once for this key');
   });
 
   // -- Production: Mock simulation is always blocked; ordinary job CRUD is not
-  // (a user may legitimately register a watch before any Provider exists) --
-  resetAll();
-  await withEnv({ SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', ENABLE_MOCK_SEAT_SIMULATION: 'true', NODE_ENV: 'test' }, async () => {
+  // (a user may legitimately register a watch before any Provider exists), as
+  // long as the store itself is usable (dev/test here) --
+  await withEnv({ ...DEV_STORES, SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', ENABLE_MOCK_SEAT_SIMULATION: 'true', NODE_ENV: 'test' }, async () => {
+    resetAll();
     const user = await signup('prod@example.com', 'block-prod');
-    const deviceRes = await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'prod@example.com' }, token: user.token, clientId: 'block-prod-device' }));
+    const deviceRes = await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'prod@example.com' }, cookie: user.cookie, clientId: 'block-prod-device' }));
     const device = (await deviceRes.json()).device;
-    const createRes = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'email', deviceId: device.id }] }), token: user.token, clientId: 'block-prod-create' }));
+    const createRes = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'email', deviceId: device.id }] }), cookie: user.cookie, clientId: 'block-prod-create' }));
     const job = (await createRes.json()).job;
 
     await withEnv({ NODE_ENV: 'production' }, async () => {
       const simBlocked = await watchJobSimulateRoute.POST(
-        req(`http://test/api/watch-jobs/${job.id}/simulate`, { method: 'POST', body: { idempotencyKey: 'prod-1', tick: 3 }, token: user.token, clientId: 'block-prod-sim' }),
+        req(`http://test/api/watch-jobs/${job.id}/simulate`, { method: 'POST', body: { idempotencyKey: 'prod-1', tick: 3 }, cookie: user.cookie, clientId: 'block-prod-sim' }),
         { params: Promise.resolve({ id: job.id }) },
       );
       assert.equal(simBlocked.status, 503, 'Mock simulation must always be blocked in production, even with a syntactically valid tick');
 
-      // Ordinary CRUD (create/list/detail) is allowed once authenticated --
-      // PROVIDER_UNAVAILABLE is the honest state a Production user sees.
-      const listRes = await watchJobsRoute.GET(req('http://test/api/watch-jobs', { token: user.token }));
-      assert.equal(listRes.status, 200);
+      // §1 검토사항 반영 후 달라진 점: v0.5 최초 설계는 "Provider 미연결이어도
+      // 인증만 되면 Production에서도 감시 작업 조회는 허용"이었지만, 이제는
+      // AUTH_STORE가 Production에서 항상 사용 불가로 취급되므로 requireAuth
+      // 자체가 먼저 실패한다 -- 영속 저장소가 실제로 연결되기 전까지는
+      // Production에서 그 어떤 인증 필요 작업도 할 수 없다는 것이 지금의
+      // 의도된(더 엄격해진) 동작이다.
+      const listRes = await watchJobsRoute.GET(req('http://test/api/watch-jobs', { cookie: user.cookie }));
+      assert.equal(listRes.status, 503, 'production에서는 AUTH_STORE_DISABLED로 인증 자체가 막혀야 한다');
+      assert.equal((await listRes.json()).error.code, 'AUTH_STORE_DISABLED');
+
       const statusRes = await providerStatusRoute.GET();
-      assert.equal(statusRes.status, 200);
-      assert.equal((await statusRes.json()).mockSimulationEnabled, false, 'provider-status must report simulation as unavailable in production regardless of the env flag');
+      assert.equal(statusRes.status, 200, 'provider-status는 인증이 필요 없는 공개 엔드포인트라 여전히 응답해야 한다');
+      const statusJson = await statusRes.json();
+      assert.equal(statusJson.mockSimulationEnabled, false, 'provider-status must report simulation as unavailable in production regardless of the env flag');
+      assert.equal(statusJson.watchStoreEnabled, false, 'production must report the watch store as unusable, matching the real fail-closed behavior');
     });
 
-    const afterProd = await watchJobDetailRoute.GET(req(`http://test/api/watch-jobs/${job.id}`, { token: user.token }), { params: Promise.resolve({ id: job.id }) });
+    const afterProd = await watchJobDetailRoute.GET(req(`http://test/api/watch-jobs/${job.id}`, { cookie: user.cookie }), { params: Promise.resolve({ id: job.id }) });
     assert.equal((await afterProd.json()).job.status, job.status, 'the production-blocked simulate call must not have mutated the job');
   });
 
-  // -- account deletion cascades to watch data --
-  resetAll();
-  await withEnv({ SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
+  // -- account deletion cascades to watch data + pseudonymizes audit events --
+  await withEnv({ ...DEV_STORES, SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
+    resetAll();
     const user = await signup('delete-me@example.com', 'block-delete');
-    const deviceRes = await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'delete-me@example.com' }, token: user.token, clientId: 'block-delete-device' }));
+    const deviceRes = await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'delete-me@example.com' }, cookie: user.cookie, clientId: 'block-delete-device' }));
     const device = (await deviceRes.json()).device;
-    const createRes = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'email', deviceId: device.id }] }), token: user.token, clientId: 'block-delete-create' }));
+    const createRes = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'email', deviceId: device.id }] }), cookie: user.cookie, clientId: 'block-delete-create' }));
     assert.equal(createRes.status, 201);
     assert.equal(watchStore.listWatchJobs(user.user.id).length, 1);
+    const auditCountBefore = watchStore.listAuditEvents(user.user.id).length;
+    assert.ok(auditCountBefore > 0);
 
-    const deleteRes = await accountRoute.DELETE(req('http://test/api/auth/account', { method: 'DELETE', token: user.token }));
+    const deleteRes = await accountRoute.DELETE(req('http://test/api/auth/account', { method: 'DELETE', body: { password: FAKE_PASSWORD }, cookie: user.cookie, clientId: 'block-delete-confirm' }));
     assert.equal(deleteRes.status, 200);
     assert.equal(watchStore.listWatchJobs(user.user.id).length, 0, 'account deletion must remove the user\'s watch jobs');
+    assert.equal(watchStore.listAuditEvents(user.user.id).length, 0, '가명처리 후에는 원래 userId로 감사 이벤트를 찾을 수 없어야 한다');
 
-    const afterDelete = await sessionRoute.GET(req('http://test/api/auth/session', { token: user.token }));
+    const afterDelete = await sessionRoute.GET(req('http://test/api/auth/session', { cookie: user.cookie }));
     assert.equal(afterDelete.status, 401, 'the deleted account\'s session must no longer be valid');
   });
 
@@ -469,6 +727,11 @@ async function main() {
   assert.equal(fetchCalls, 0, 'the v0.5 auth/watch subsystem must never call fetch');
   const leaked = capturedLogs.some((line) => line.includes(FAKE_PASSWORD));
   assert.equal(leaked, false, 'no log line may contain a plaintext password');
+
+  // §9 검토사항: Service Worker가 /api/**를 캐시하지 않는지 정적으로 재확인한다
+  // (이 오프라인 스크립트에는 실제 브라우저/SW 실행 환경이 없으므로 텍스트 검사로 대체).
+  const swSource = fs.readFileSync(path.join(root, 'public/sw.js'), 'utf8');
+  assert.ok(/\/api\//.test(swSource) && /return/.test(swSource), 'public/sw.js must still bypass /api/** from its cache logic');
 
   originalLog(JSON.stringify({ result: 'PASS', fetchCalls, capturedLogLines: capturedLogs.length }));
 }
