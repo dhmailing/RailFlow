@@ -319,26 +319,53 @@ async function main() {
     assert.match(setCookie, /Path=\//i);
   });
 
-  // === §3 검토사항: CSRF/Origin 검증 + 계정삭제 재인증 ===========================
+  // === §3 재검토: APP_ORIGIN 기반 전체 Origin 검증 + 계정삭제 재인증 ===========
 
-  await withEnv({ NODE_ENV: 'production' }, () => {
-    assert.doesNotThrow(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'http://test' })), 'Origin이 Host와 일치하면 허용');
-    assert.throws(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'http://evil.example' })), { code: 'FORBIDDEN_ORIGIN' }, '다른 Origin은 거부');
+  // 올바른 Origin: APP_ORIGIN과 scheme+host가 정확히 일치.
+  await withEnv({ NODE_ENV: 'production', APP_ORIGIN: 'http://test' }, () => {
+    assert.doesNotThrow(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'http://test' })), 'APP_ORIGIN과 정확히 일치하는 Origin은 허용');
+    // 잘못된 host.
+    assert.throws(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'http://evil.example' })), { code: 'FORBIDDEN_ORIGIN' }, '다른 host는 거부');
+    // 잘못된 scheme(host는 같지만 http vs https) -- Host 헤더 비교였다면 놓쳤을 케이스.
+    assert.throws(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'https://test' })), { code: 'FORBIDDEN_ORIGIN' }, 'host가 같아도 scheme이 다르면 거부');
+    // Origin 누락.
     assert.throws(() => assertTrustedOrigin(req('http://test/api/x')), { code: 'FORBIDDEN_ORIGIN' }, 'Origin 누락은 허용이 아니라 거부');
   });
+
+  // APP_ORIGIN이 없거나 형식이 잘못된 경우: Host 헤더로 대신 비교하는 폴백 없이 fail-closed.
+  await withEnv({ NODE_ENV: 'production' }, () => {
+    assert.throws(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'http://test' })), { code: 'FORBIDDEN_ORIGIN' }, 'APP_ORIGIN이 없으면 겉보기에 올바른 Origin도 거부해야 한다');
+  });
+  await withEnv({ NODE_ENV: 'production', APP_ORIGIN: 'not-a-valid-origin' }, () => {
+    assert.throws(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'http://test' })), { code: 'FORBIDDEN_ORIGIN' }, 'APP_ORIGIN이 URL 형식이 아니면 거부해야 한다');
+  });
+  await withEnv({ NODE_ENV: 'production', APP_ORIGIN: 'http://test/some/path' }, () => {
+    assert.throws(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'http://test' })), { code: 'FORBIDDEN_ORIGIN' }, 'APP_ORIGIN에 경로가 포함되면(순수 origin이 아니면) 거부해야 한다');
+  });
+
   await withEnv({ NODE_ENV: 'test' }, () => {
-    assert.doesNotThrow(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'http://evil.example' })), '개발/테스트 환경에서는 Origin을 강제하지 않는다');
+    assert.doesNotThrow(() => assertTrustedOrigin(req('http://test/api/x', { origin: 'http://evil.example' })), '개발/테스트 환경에서는 Origin을 강제하지 않는다(APP_ORIGIN 미설정이어도 통과)');
   });
 
   // Full-route integration: /api/auth/logout has no store-disabled short-circuit
   // ahead of the Origin check, so it is reachable end-to-end even in production.
-  await withEnv({ NODE_ENV: 'production' }, async () => {
+  await withEnv({ NODE_ENV: 'production', APP_ORIGIN: 'http://test' }, async () => {
     const forged = await logoutRoute.POST(req('http://test/api/auth/logout', { method: 'POST', origin: 'http://evil.example', clientId: 'block-csrf-bad' }));
     assert.equal(forged.status, 403);
     assert.equal((await forged.json()).error.code, 'FORBIDDEN_ORIGIN');
 
+    const wrongScheme = await logoutRoute.POST(req('http://test/api/auth/logout', { method: 'POST', origin: 'https://test', clientId: 'block-csrf-scheme' }));
+    assert.equal(wrongScheme.status, 403, 'scheme만 다른 Origin도 실제 라우트에서 거부돼야 한다');
+
     const trusted = await logoutRoute.POST(req('http://test/api/auth/logout', { method: 'POST', origin: 'http://test', clientId: 'block-csrf-ok' }));
     assert.equal(trusted.status, 200, '일치하는 Origin은 production에서도 통과해야 한다');
+  });
+
+  // APP_ORIGIN이 없으면, 실제 라우트에서도 유효해 보이는 Origin까지 통째로 거부된다.
+  await withEnv({ NODE_ENV: 'production' }, async () => {
+    const noAppOrigin = await logoutRoute.POST(req('http://test/api/auth/logout', { method: 'POST', origin: 'http://test', clientId: 'block-csrf-no-app-origin' }));
+    assert.equal(noAppOrigin.status, 403, 'APP_ORIGIN 미설정 상태에서는 production의 모든 상태 변경 요청이 거부돼야 한다');
+    assert.equal((await noAppOrigin.json()).error.code, 'FORBIDDEN_ORIGIN');
   });
 
   await withEnv({ ...DEV_STORES, NODE_ENV: 'test' }, async () => {
@@ -534,13 +561,45 @@ async function main() {
     assert.equal(listInMemoryDeliveries().length, 2, '어댑터는 verified 기기 수만큼만 실제로 호출돼야 한다');
 
     // Reprocessing the exact same event for the same device/channel/cycle must not double-send.
+    // (재검토, §6) 이미 끝난 outbox 행은 그대로 "delivered" 상태를 유지한다 --
+    // "skipped_duplicate"라는 별도 상태로 다시 쓰지 않는다(claim()의 반환값
+    // outcome이 "duplicate"일 뿐, 저장된 행 자체는 갱신되지 않는다).
     const fcmMethodKey = `${job.id}:${state.foundCandidateId}:seat_found:fcm:${fcmDevice.id}:0`;
     const replay = await dispatchNotification({
       userId: user.user.id, watchJobId: job.id, candidateId: state.foundCandidateId, channel: 'fcm', deviceId: fcmDevice.id, watchCycle: 0,
       eventType: 'seat_found', idempotencyKey: fcmMethodKey, destination: fcmDevice.token, deviceVerified: true, title: 't', body: 'b',
     });
-    assert.equal(replay.status, 'skipped_duplicate', '§6: 같은 채널·같은 기기·같은 세대의 완전한 중복은 걸러져야 한다');
+    assert.equal(replay.status, 'delivered', '§6: 같은 채널·같은 기기·같은 세대의 완전한 중복은 이미 끝난 delivered 행을 그대로 반환해야 한다');
     assert.equal(listInMemoryDeliveries().length, 2, '중복 재처리는 어댑터를 다시 호출하면 안 된다');
+    assert.equal(watchStore.listNotificationDeliveries(user.user.id, job.id).filter((d) => d.idempotencyKey === fcmMethodKey).length, 1, '같은 idempotencyKey는 outbox에 행을 하나만 가져야 한다(재처리로 새 행이 생기면 안 됨)');
+
+    // -- §6 재검토: 동시 dispatch 경쟁 조건 -- 완전히 새로운 idempotencyKey를
+    // Promise.all로 10회 동시에 dispatch해도 어댑터는 정확히 1회만 호출돼야
+    // 한다(claim이 동기적으로 단 한 호출자에게만 발급되므로, 나머지는
+    // 어댑터를 절대 호출하지 않고 "sending"/"delivered" 상태의 같은 행만
+    // 돌려받는다).
+    const freshConcurrencyKey = `${job.id}:${state.foundCandidateId}:seat_found:webpush:${webpushDevice.id}:concurrency-fresh`;
+    const beforeConcurrentCount = listInMemoryDeliveries().length;
+    const concurrentResults = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        dispatchNotification({
+          userId: user.user.id, watchJobId: job.id, candidateId: state.foundCandidateId, channel: 'webpush', deviceId: webpushDevice.id, watchCycle: 0,
+          eventType: 'seat_found', idempotencyKey: freshConcurrencyKey, destination: webpushDevice.token, deviceVerified: true, title: 't', body: 'b',
+        }),
+      ),
+    );
+    assert.equal(listInMemoryDeliveries().length, beforeConcurrentCount + 1, '10번 동시 dispatch해도 어댑터는 정확히 1회만 호출돼야 한다');
+    assert.equal(concurrentResults.filter((r) => r.status === 'delivered').length, 1, '정확히 하나의 호출만 delivered로 끝나야 한다');
+    assert.equal(concurrentResults.filter((r) => r.status === 'sending').length, 9, '나머지 9개는 claim을 얻지 못해 sending(선점됨) 상태의 같은 행을 받아야 한다');
+    const freshRows = watchStore.listNotificationDeliveries(user.user.id, job.id).filter((d) => d.idempotencyKey === freshConcurrencyKey);
+    assert.equal(freshRows.length, 1, '동시 호출 10회도 outbox 행을 하나만 만들어야 한다(경쟁 조건으로 여러 행이 생기면 안 됨)');
+    assert.equal(freshRows[0].status, 'delivered', '경쟁에서 이긴 단 하나의 claim만 실제로 완료돼야 한다');
+    assert.equal(freshRows[0].attemptCount, 1);
+
+    // 서로 다른 기기/채널/watchCycle은 서로 다른 idempotencyKey를 가지므로
+    // 각각 독립적으로 claim되어 각자 1회씩 발송돼야 한다(§6: 채널/기기/세대
+    // 구분 없이 하나로 뭉뚱그려지면 안 됨 -- 이미 위 cycle0SeatFound 검증에서
+    // fcm/webpush가 각각 1건씩 delivered인 것으로 확인했다).
 
     // -- "다시 감시" then re-drive to SEAT_FOUND: a NEW notification must go out (§6 재감시 요구사항) --
     const resumed = await watchJobResumeRoute.POST(req(`http://test/api/watch-jobs/${job.id}/resume`, { method: 'POST', cookie: user.cookie, clientId: 'block-flow-resume' }), { params: Promise.resolve({ id: job.id }) });
@@ -556,7 +615,7 @@ async function main() {
     deliveries = watchStore.listNotificationDeliveries(user.user.id, job.id);
     const cycle1SeatFound = deliveries.filter((d) => d.eventType === 'seat_found' && d.watchCycle === 1);
     assert.equal(cycle1SeatFound.filter((d) => d.status === 'delivered').length, 2, '재감시 이후 같은 후보가 다시 발견되면 새 알림이 나가야 한다(이전 세대와 겹치지 않음)');
-    assert.equal(listInMemoryDeliveries().length, 4, '누적 실제 발송 횟수: 1세대 2건 + 2세대 2건');
+    assert.equal(listInMemoryDeliveries().length, 5, '누적 실제 발송 횟수: 1세대 2건 + 동시성 테스트 1건 + 2세대 2건');
 
     const confirmRes = await watchJobConfirmRoute.POST(req(`http://test/api/watch-jobs/${job.id}/confirm-booking`, { method: 'POST', cookie: user.cookie, clientId: 'block-flow-confirm' }), { params: Promise.resolve({ id: job.id }) });
     assert.equal(confirmRes.status, 200);
@@ -630,35 +689,55 @@ async function main() {
     });
   });
 
-  // -- notification retry-on-failure + idempotency-on-success --
+  // -- notification retry-on-failure + idempotency-on-success (outbox/claim model) --
   await withEnv({ ...DEV_STORES, NODE_ENV: 'test' }, async () => {
     resetAll();
     const user = await signup('notif@example.com', 'block-notif');
     const jobId = watchStore.createWatchJob({ ...baseJobInput(), userId: user.user.id }, 'mock').id;
     const key = 'retry-idem-test';
+    const baseInput = { userId: user.user.id, watchJobId: jobId, candidateId: null, channel: 'email', deviceId: 'device-x', watchCycle: 0, eventType: 'seat_found', idempotencyKey: key, destination: 'notif@example.com', deviceVerified: true, title: 't', body: 'b' };
 
     await withEnv({ NODE_ENV: 'production' }, async () => {
-      const failed = await dispatchNotification({
-        userId: user.user.id, watchJobId: jobId, candidateId: null, channel: 'email', deviceId: 'device-x', watchCycle: 0, eventType: 'seat_found',
-        idempotencyKey: key, destination: 'notif@example.com', deviceVerified: true, title: 't', body: 'b',
-      });
+      const failed = await dispatchNotification(baseInput);
       assert.equal(failed.status, 'failed', 'no real channel is configured in production, so the first attempt must fail closed');
+      assert.equal(failed.attemptCount, 1);
     });
 
     assert.equal(watchStore.hasDeliveredNotification(user.user.id, key), false, 'a failed attempt must not be treated as delivered');
 
-    const delivered = await dispatchNotification({
-      userId: user.user.id, watchJobId: jobId, candidateId: null, channel: 'email', deviceId: 'device-x', watchCycle: 0, eventType: 'seat_found',
-      idempotencyKey: key, destination: 'notif@example.com', deviceVerified: true, title: 't', body: 'b',
-    });
+    // §6 재검토: 허용된 재시도는 정확히 1회만 다시 발송해야 한다.
+    const delivered = await dispatchNotification(baseInput);
     assert.equal(delivered.status, 'delivered', 'the same idempotencyKey must be retryable after a failure, and now succeeds (dev/test uses the InMemory adapter)');
+    assert.equal(delivered.attemptCount, 2, '실패(1회) 이후 재시도(2회째)로 성공해야 한다');
+    assert.equal(listInMemoryDeliveries().length, 1, '재시도까지 포함해 어댑터는 정확히 1회만 실제로 호출돼야 한다');
 
-    const dupe = await dispatchNotification({
-      userId: user.user.id, watchJobId: jobId, candidateId: null, channel: 'email', deviceId: 'device-x', watchCycle: 0, eventType: 'seat_found',
-      idempotencyKey: key, destination: 'notif@example.com', deviceVerified: true, title: 't', body: 'b',
-    });
-    assert.equal(dupe.status, 'skipped_duplicate', 'a second delivery attempt with the same key after success must not resend');
+    const dupe = await dispatchNotification(baseInput);
+    assert.equal(dupe.status, 'delivered', 'a second delivery attempt with the same key after success must return the already-delivered row, not resend');
+    assert.equal(dupe.attemptCount, 2, '이미 끝난 claim을 재처리해도 attemptCount가 증가하면 안 된다');
     assert.equal(listInMemoryDeliveries().length, 1, 'the adapter itself must only ever have been invoked once for this key');
+  });
+
+  // -- notification outbox lease: an unexpired claim blocks other workers,
+  // an expired (abandoned) claim can be reclaimed for retry --
+  await withEnv({ ...DEV_STORES, NODE_ENV: 'test', NOTIFICATION_CLAIM_LEASE_MS: '50' }, async () => {
+    resetAll();
+    const user = await signup('lease@example.com', 'block-lease');
+    const jobId = watchStore.createWatchJob({ ...baseJobInput(), userId: user.user.id }, 'mock').id;
+    const claimInput = { userId: user.user.id, watchJobId: jobId, candidateId: null, channel: 'email', deviceId: 'device-lease', watchCycle: 0, eventType: 'seat_found', idempotencyKey: 'lease-test' };
+
+    const firstClaim = watchStore.claimNotification(claimInput);
+    assert.equal(firstClaim.outcome, 'claimed');
+    assert.equal(firstClaim.entry.attemptCount, 1);
+
+    const secondClaim = watchStore.claimNotification(claimInput);
+    assert.equal(secondClaim.outcome, 'already_claimed', '만료되지 않은 claim은 다른 Worker가 획득할 수 없어야 한다');
+    assert.equal(secondClaim.entry.attemptCount, 1, '획득 실패는 attemptCount를 증가시키면 안 된다');
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    const reclaim = watchStore.claimNotification(claimInput);
+    assert.equal(reclaim.outcome, 'claimed', '만료된(방치된) claim은 재획득 가능해야 한다');
+    assert.equal(reclaim.entry.attemptCount, 2, '재획득은 시도 횟수를 증가시켜야 한다');
   });
 
   // -- Production: Mock simulation is always blocked; ordinary job CRUD is not
@@ -701,21 +780,52 @@ async function main() {
   });
 
   // -- account deletion cascades to watch data + pseudonymizes audit events --
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   await withEnv({ ...DEV_STORES, SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
     resetAll();
     const user = await signup('delete-me@example.com', 'block-delete');
+    const userB = await signup('delete-me-b@example.com', 'block-delete-b');
     const deviceRes = await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'delete-me@example.com' }, cookie: user.cookie, clientId: 'block-delete-device' }));
     const device = (await deviceRes.json()).device;
+    // userB는 device_registered 감사 이벤트를 하나 남겨 가명 검증에 쓸 이벤트가
+    // 있게 한다(현재 코드는 user_signup 자체를 감사 로그에 남기지 않는다).
+    await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'delete-me-b@example.com' }, cookie: userB.cookie, clientId: 'block-delete-device-b' }));
     const createRes = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'email', deviceId: device.id }] }), cookie: user.cookie, clientId: 'block-delete-create' }));
     assert.equal(createRes.status, 201);
     assert.equal(watchStore.listWatchJobs(user.user.id).length, 1);
     const auditCountBefore = watchStore.listAuditEvents(user.user.id).length;
-    assert.ok(auditCountBefore > 0);
+    assert.ok(auditCountBefore > 1, '가명 일치 검증을 위해 이 사용자는 감사 이벤트가 2개 이상이어야 한다(signup + device + job 등)');
+    const originalUserId = user.user.id;
 
     const deleteRes = await accountRoute.DELETE(req('http://test/api/auth/account', { method: 'DELETE', body: { password: FAKE_PASSWORD }, cookie: user.cookie, clientId: 'block-delete-confirm' }));
     assert.equal(deleteRes.status, 200);
     assert.equal(watchStore.listWatchJobs(user.user.id).length, 0, 'account deletion must remove the user\'s watch jobs');
-    assert.equal(watchStore.listAuditEvents(user.user.id).length, 0, '가명처리 후에는 원래 userId로 감사 이벤트를 찾을 수 없어야 한다');
+    assert.equal(watchStore.listAuditEvents(originalUserId).length, 0, '가명처리 후에는 원래 userId로 감사 이벤트를 찾을 수 없어야 한다');
+
+    // §1 재검토: 가명은 실제 UUID 형식이어야 하고(Postgres audit_events.user_id
+    // uuid 컬럼과 타입이 맞아야 함), 원래 userId와 달라야 하며, 같은 사용자의
+    // 모든 이벤트는 같은 가명을 공유해야 한다. userB는 아직 삭제되지 않았으므로
+    // (자신의 실제 userId를 그대로 갖고 있어 UUID 접두사 매칭에 걸리지 않음)
+    // 지금 시점에 UUID 형식 userId를 가진 이벤트는 전부 방금 삭제된 A의 것이다.
+    const pseudonymEventsA = watchStore.__listAllAuditEventsForTests().filter((e) => UUID_RE.test(e.userId));
+    const candidatePseudonyms = new Set(pseudonymEventsA.map((e) => e.userId));
+    assert.equal(candidatePseudonyms.size, 1, '삭제된 사용자의 모든 감사 이벤트는 정확히 하나의 공통 가명을 공유해야 한다');
+    const pseudonymA = [...candidatePseudonyms][0];
+    assert.ok(UUID_RE.test(pseudonymA), `가명은 유효한 UUID 형식이어야 한다: ${pseudonymA}`);
+    assert.notEqual(pseudonymA, originalUserId, '가명은 원래 userId와 달라야 한다');
+    assert.equal(pseudonymEventsA.length, auditCountBefore, '같은 사용자의 모든 이벤트가 동일한 가명으로 치환되어야 한다(개수 보존)');
+
+    // 두 번째 계정을 삭제해 서로 다른 사용자가 서로 다른 가명을 받는지 확인한다.
+    const originalUserIdB = userB.user.id;
+    const auditCountBeforeB = watchStore.listAuditEvents(originalUserIdB).length;
+    assert.ok(auditCountBeforeB > 0);
+    const deleteResB = await accountRoute.DELETE(req('http://test/api/auth/account', { method: 'DELETE', body: { password: FAKE_PASSWORD }, cookie: userB.cookie, clientId: 'block-delete-confirm-b' }));
+    assert.equal(deleteResB.status, 200);
+    const pseudonymEventsB = watchStore.__listAllAuditEventsForTests().filter((e) => UUID_RE.test(e.userId) && e.userId !== pseudonymA);
+    const candidatePseudonymsB = new Set(pseudonymEventsB.map((e) => e.userId));
+    assert.equal(candidatePseudonymsB.size, 1, '두 번째 삭제 계정도 자신만의 단일 가명을 가져야 한다');
+    const pseudonymB = [...candidatePseudonymsB][0];
+    assert.notEqual(pseudonymB, pseudonymA, '서로 다른 삭제 계정은 서로 다른 가명을 받아야 한다');
 
     const afterDelete = await sessionRoute.GET(req('http://test/api/auth/session', { cookie: user.cookie }));
     assert.equal(afterDelete.status, 401, 'the deleted account\'s session must no longer be valid');
