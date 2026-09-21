@@ -20,7 +20,9 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
     }
     const job = getWatchJob(id, user.id);
     const result = await koreailWebFallbackBookingLaunchProvider.launch(job, candidateId);
-    return NextResponse.json(result);
+    const response = NextResponse.json(result);
+    response.headers.set("Cache-Control", "no-store");
+    return response;
   } catch (error) {
     return watchErrorResponse(error);
   }

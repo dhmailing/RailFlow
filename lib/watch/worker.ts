@@ -32,14 +32,21 @@ async function notifyAll(job: WatchJob, eventType: "seat_found" | "watch_expired
       eventType === "seat_found"
         ? `${job.departure} → ${job.arrival} · ${job.date} 열차의 좌석이 감지됐습니다. RailFlow에서 확인하고 코레일+에서 예매를 완료해주세요.`
         : `${job.departure} → ${job.arrival} · ${job.date} 감시가 종료 시각을 지나 만료됐습니다.`;
+    // §6 검토사항: 멱등키에 channel+deviceId+watchCycle을 포함시켜, 같은
+    // 이벤트라도 채널·기기마다 각자 한 번씩 알림을 받게 하고("다시 감시" 이후
+    // 새 세대에서는 같은 후보라도 새 알림이 나가게) 한다. 오직 같은
+    // 채널·같은 기기·같은 세대의 완전한 중복만 걸러진다.
     await dispatchNotification({
       userId: job.userId,
       watchJobId: job.id,
       candidateId,
       channel: method.channel,
+      deviceId: device.id,
+      watchCycle: job.watchCycle,
       eventType,
-      idempotencyKey: `${job.id}:${candidateId ?? "job"}:${eventType}`,
+      idempotencyKey: `${job.id}:${candidateId ?? "job"}:${eventType}:${method.channel}:${device.id}:${job.watchCycle}`,
       destination: device.token,
+      deviceVerified: device.verified,
       title,
       body,
     });
@@ -159,5 +166,10 @@ export function confirmBooking(jobId: string, userId: string): WatchJob {
 }
 
 export function resumeWatching(jobId: string, userId: string): WatchJob {
-  return transitionWatchJob(jobId, userId, "WATCHING", "예매가 완료되지 않아 다시 감시를 시작합니다.");
+  const job = getWatchJob(jobId, userId);
+  // §6 검토사항: 세대 카운터를 증가시켜, 재감시 이후 같은 후보가 다시
+  // 발견됐을 때 이전 세대의 멱등키와 겹치지 않고 새 알림이 나가게 한다.
+  return transitionWatchJob(jobId, userId, "WATCHING", "예매가 완료되지 않아 다시 감시를 시작합니다.", {
+    watchCycle: job.watchCycle + 1,
+  });
 }

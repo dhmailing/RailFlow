@@ -10,7 +10,9 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
   try {
     const user = await requireAuth(request);
     const { id } = await context.params;
-    return NextResponse.json({ job: getWatchJob(id, user.id) });
+    const response = NextResponse.json({ job: getWatchJob(id, user.id) });
+    response.headers.set("Cache-Control", "no-store");
+    return response;
   } catch (error) {
     return watchErrorResponse(error);
   }

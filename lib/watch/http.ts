@@ -2,12 +2,26 @@ import "server-only";
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { AuthError } from "@/lib/auth/types";
+import { createMemoryRateLimiter } from "@/lib/security/rate-limit";
+import { OriginError } from "@/lib/security/origin-guard";
+import { AuthError, type AuthErrorCode } from "@/lib/auth/types";
 import { WatchError, type WatchErrorCode } from "@/lib/watch/types";
 
 export function errorResponse(status: number, code: string, message: string) {
-  return NextResponse.json({ error: { code, message } }, { status });
+  const response = NextResponse.json({ error: { code, message } }, { status });
+  response.headers.set("Cache-Control", "no-store");
+  return response;
 }
+
+const AUTH_STATUS_BY_CODE: Record<AuthErrorCode, number> = {
+  EMAIL_TAKEN: 409,
+  INVALID_CREDENTIALS: 401,
+  UNAUTHENTICATED: 401,
+  SESSION_EXPIRED: 401,
+  WEAK_PASSWORD: 400,
+  AUTH_STORE_DISABLED: 503,
+  REAUTH_REQUIRED: 401,
+};
 
 const STATUS_BY_CODE: Record<WatchErrorCode, number> = {
   UNAUTHENTICATED: 401,
@@ -21,11 +35,17 @@ const STATUS_BY_CODE: Record<WatchErrorCode, number> = {
   CHECK_FAILED: 502,
   NOTIFICATION_NOT_CONFIGURED: 503,
   INVALID_DEVICE: 400,
+  WATCH_STORE_DISABLED: 503,
+  NOTIFICATION_CHANNEL_MISMATCH: 400,
+  INVALID_CANDIDATE: 400,
 };
 
 export function watchErrorResponse(error: unknown) {
+  if (error instanceof OriginError) {
+    return errorResponse(403, error.code, error.message);
+  }
   if (error instanceof AuthError) {
-    return errorResponse(401, error.code, error.message);
+    return errorResponse(AUTH_STATUS_BY_CODE[error.code] ?? 401, error.code, error.message);
   }
   if (error instanceof WatchError) {
     return errorResponse(STATUS_BY_CODE[error.code] ?? 500, error.code, error.message);
@@ -33,25 +53,13 @@ export function watchErrorResponse(error: unknown) {
   return errorResponse(500, "WATCH_FAILED", "취소표 감시 작업 처리 중 오류가 발생했습니다.");
 }
 
-// Same shape as lib/reservation/http.ts / lib/auth/http.ts -- kept as its own
-// copy per this repo's existing per-module convention.
+// §4 검토사항: lib/security/rate-limit.ts의 공유 구현으로 위임한다 --
+// 개발/테스트 전용 per-instance 제한기라는 사실과 신뢰 경계는 그 파일에
+// 문서화되어 있다. 이 함수는 기존 라우트들의 `const isRateLimited =
+// createRateLimiter(n)` 호출부를 바꾸지 않기 위한 얇은 어댑터일 뿐이다.
 export function createRateLimiter(limitPerMinute: number) {
-  const buckets = new Map<string, { count: number; resetAt: number }>();
-  return function isRateLimited(request: NextRequest): boolean {
-    const clientId =
-      request.headers.get("cf-connecting-ip") ??
-      request.headers.get("x-forwarded-for")?.split(",")[0] ??
-      "anonymous";
-    const now = Date.now();
-    for (const [key, value] of buckets) if (value.resetAt <= now) buckets.delete(key);
-    const bucket = buckets.get(clientId);
-    if (!bucket || bucket.resetAt <= now) {
-      buckets.set(clientId, { count: 1, resetAt: now + 60_000 });
-      return false;
-    }
-    bucket.count += 1;
-    return bucket.count > limitPerMinute;
-  };
+  const limiter = createMemoryRateLimiter(limitPerMinute);
+  return (request: NextRequest) => limiter.isRateLimited(request);
 }
 
 // Every Demo-era lesson from v0.4 applies here too, except this module never
@@ -63,7 +71,8 @@ export function createRateLimiter(limitPerMinute: number) {
 // job CRUD itself is allowed in Production once authenticated, since a user
 // may legitimately register a watch intent before any Seat Availability
 // Provider is connected (PROVIDER_UNAVAILABLE is a real, user-facing state,
-// not a dev-only one).
+// not a dev-only one). In practice, WATCH_STORE_DISABLED (lib/watch/store.ts)
+// already blocks job/device creation in Production independently of this.
 export function isProductionEnvironment(): boolean {
   return process.env.NODE_ENV === "production";
 }

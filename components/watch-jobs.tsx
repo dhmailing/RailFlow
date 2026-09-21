@@ -15,9 +15,23 @@ const isDev = process.env.NODE_ENV !== "production";
 type JobStatus =
   | "REGISTERED" | "WATCHING" | "SEAT_FOUND" | "COMPLETED" | "CANCELLED" | "EXPIRED" | "PROVIDER_UNAVAILABLE" | "RATE_LIMITED" | "FAILED";
 
-type Device = { id: string; channel: "fcm" | "webpush" | "telegram" | "email"; token: string; label: string | null };
+type Device = {
+  id: string;
+  channel: "fcm" | "webpush" | "telegram" | "email";
+  maskedDestination: string;
+  verified: boolean;
+  label: string | null;
+};
 
-type TrainCandidate = { id: string; trainNumber: string; trainType: string; departAt: string; arriveAt: string; mockScenario?: string };
+type TrainCandidate = {
+  id: string;
+  externalKey: string;
+  trainNumber: string;
+  trainType: string;
+  departAt: string;
+  arriveAt: string;
+  mockScenario?: string;
+};
 
 type WatchJob = {
   id: string;
@@ -36,6 +50,7 @@ type WatchJob = {
 type ProviderStatus = {
   seatAvailabilityProvider: "disabled" | "mock";
   jobsEnabled: boolean;
+  watchStoreEnabled: boolean;
   mockSimulationEnabled: boolean;
 };
 
@@ -148,7 +163,7 @@ export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
     try {
       const watchUntil = new Date(Date.now() + Number(watchHours) * 60 * 60 * 1000).toISOString();
       const candidates = candidateRows.map((row, index) => ({
-        id: crypto.randomUUID(),
+        externalKey: crypto.randomUUID(),
         trainNumber: row.trainNumber,
         trainType,
         departAt: `${date}T${row.departAt}:00+09:00`,
@@ -277,6 +292,10 @@ export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
   }
 
   const providerUnavailable = !status || status.seatAvailabilityProvider === "disabled";
+  // §1 검토사항: 운영 저장소(WATCH_STORE)가 연결되지 않은 상태에서는 새 기기
+  // 등록·감시 작업 등록 폼 자체를 숨긴다 -- 서버가 어차피 503으로 거부하는
+  // 폼을 보여주며 실제로 저장되는 것처럼 오해하게 만들지 않는다.
+  const storeDisabled = !!status && !status.watchStoreEnabled;
   const watchingJobs = jobs.filter((j) => !["SEAT_FOUND", "COMPLETED", "CANCELLED", "EXPIRED", "FAILED"].includes(j.status));
   const seatFoundJobs = jobs.filter((j) => j.status === "SEAT_FOUND");
 
@@ -291,6 +310,13 @@ export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
         {!status?.jobsEnabled && <p className="mt-1 text-white/40">감시 작업 기능이 서버에서 아직 활성화되지 않았습니다.</p>}
       </div>
 
+      {storeDisabled ? (
+        <div className="rounded-2xl border border-white/10 bg-black/30 p-5 text-sm leading-6 text-white/50">
+          <p className="font-bold text-white/70">감시 작업 등록 기능 준비 중</p>
+          <p className="mt-1">운영 저장소가 아직 연결되지 않아 새 알림 수신처·감시 작업을 등록할 수 없습니다. 연결 후 다시 안내할게요.</p>
+        </div>
+      ) : (
+      <>
       <Card className="rounded-2xl border-white/10 bg-black/30 py-0">
         <CardContent className="space-y-3 p-4">
           <p className="text-sm font-bold text-white/70">알림 받을 곳</p>
@@ -299,7 +325,8 @@ export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
             {devices.map((d) => (
               <label key={d.id} className={`flex cursor-pointer items-center gap-2 rounded-full border px-3 py-1.5 text-xs ${selectedDeviceIds.includes(d.id) ? "border-[#ff8a1f] bg-[#ff8a1f]/15 text-[#ffad62]" : "border-white/10 text-white/50"}`}>
                 <input type="checkbox" className="sr-only" checked={selectedDeviceIds.includes(d.id)} onChange={(e) => setSelectedDeviceIds((ids) => (e.target.checked ? [...ids, d.id] : ids.filter((id) => id !== d.id)))} />
-                {CHANNEL_LABEL[d.channel]} · {d.token.length > 18 ? `${d.token.slice(0, 18)}…` : d.token}
+                {CHANNEL_LABEL[d.channel]} · {d.maskedDestination}
+                {!d.verified && <span className="text-white/30"> · 소유권 미확인</span>}
               </label>
             ))}
           </div>
@@ -394,6 +421,8 @@ export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
           </Button>
         </CardContent>
       </Card>
+      </>
+      )}
 
       <div>
         <p className="mb-2 px-1 text-sm font-bold text-white/60">진행 중인 감시 {watchingJobs.length > 0 && `· ${watchingJobs.length}건`}</p>

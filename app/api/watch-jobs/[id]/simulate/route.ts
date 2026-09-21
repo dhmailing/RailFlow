@@ -9,6 +9,7 @@ import {
   productionSimulationBlockedResponse,
   watchErrorResponse,
 } from "@/lib/watch/http";
+import { assertTrustedOrigin } from "@/lib/security/origin-guard";
 import { assertSimulationAllowed } from "@/lib/watch/simulation-guard";
 import { getWatchJob } from "@/lib/watch/store";
 import { runJobOnce } from "@/lib/watch/worker";
@@ -29,6 +30,13 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   if (isProductionEnvironment()) {
     return productionSimulationBlockedResponse();
   }
+
+  try {
+    assertTrustedOrigin(request);
+  } catch (error) {
+    return watchErrorResponse(error);
+  }
+
   if (isRateLimited(request)) {
     return errorResponse(429, "RATE_LIMITED", "잠시 후 다시 시도해주세요.");
   }
@@ -55,7 +63,9 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     assertSimulationAllowed({ tick: parsed.data.tick, seatProvider: job.seatProvider });
 
     const updated = await runJobOnce(id, user.id, parsed.data.idempotencyKey);
-    return NextResponse.json({ job: updated });
+    const response = NextResponse.json({ job: updated });
+    response.headers.set("Cache-Control", "no-store");
+    return response;
   } catch (error) {
     return watchErrorResponse(error);
   }
