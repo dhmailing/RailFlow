@@ -455,7 +455,7 @@ export default function Home() {
                       </Button>
                       <div className="mt-3 flex flex-wrap gap-3">
                         <Button variant="ghost" onClick={resetConditions}>검색 조건 초기화</Button>
-                        <Button variant="ghost" onClick={()=>{resetConditions();setStationOptions([]);setStationLoading(true);setStationError("");setMode(mode==="live"?"demo":"live");}}>{mode==="live"?"데모 체험":"실제 조회로 전환"}</Button>
+                        <Button variant="ghost" onClick={()=>{resetConditions();setStationOptions([]);setStationLoading(true);setStationError("");setMode(mode==="live"?"demo":"live");}}>{mode==="live"?"샘플 시간표 보기":"실제 조회로 전환"}</Button>
                       </div>
                       {!departure || !arrival ? <p className="mt-2 text-sm text-white/60">출발역과 도착역을 선택해주세요.</p> : departure===arrival ? <p role="alert" className="mt-2 text-sm text-orange-300">출발역과 도착역은 서로 다르게 선택해주세요.</p> : null}
                       {stationError && <div role="alert" className="mt-3 text-sm text-orange-300">{stationError}<Button variant="ghost" onClick={()=>{setStationLoading(true);setStationRetry(v=>v+1);}}>역 목록 다시 불러오기</Button></div>}
@@ -466,7 +466,7 @@ export default function Home() {
                     <BellRing className="mt-0.5 size-5 shrink-0 text-[#ff9b3f]" />
                     {mode === "live"
                       ? "운행시간과 운임은 공식 공공데이터입니다. 좌석 잔여와 예약은 아직 코레일+에서 확인합니다."
-                      : "데모 체험 모드입니다. 표시되는 열차와 예약 결과는 실제가 아닙니다."}
+                      : "샘플 시간표 모드입니다. 표시되는 열차와 예약 결과는 실제가 아닙니다."}
                   </div>
 
                   <Link
@@ -475,9 +475,9 @@ export default function Home() {
                   >
                     <Sparkles className="mt-0.5 size-5 shrink-0 text-[#ff9b3f]" />
                     <span>
-                      <span className="font-bold text-[#ffad62]">Demo Showcase 가상 시연 체험하기</span>
+                      <span className="font-bold text-[#ffad62]">취소표 감시 가상 시연</span>
                       <br />
-                      로그인 없이 취소표 감시 등록부터 좌석 발견·알림까지 전체 흐름을 눌러볼 수 있어요. 실제 조회·예약이 아닙니다.
+                      여기서는 열차 시간표·운임을 조회하고, 이 링크는 취소표 감시 등록부터 좌석 발견·알림까지의 흐름을 로그인 없이 눌러보는 가상 시연으로 이동합니다. 둘 다 실제 좌석 조회·예약·결제는 아닙니다.
                     </span>
                   </Link>
                 </div>

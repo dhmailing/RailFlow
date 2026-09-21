@@ -288,9 +288,9 @@ export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
         >
           <Sparkles className="mt-0.5 size-5 shrink-0 text-[#ff9b3f]" />
           <span>
-            <span className="font-bold text-[#ffad62]">로그인 없이 가상 시연으로 먼저 둘러보기</span>
+            <span className="font-bold text-[#ffad62]">취소표 감시 가상 시연</span>
             <br />
-            Demo Showcase에서 감시 등록부터 좌석 발견·알림까지 흐름을 체험할 수 있어요(실제 조회·예약 아님).
+            이 화면은 실제 취소표 감시를 등록하고, 이 링크는 로그인 없이 등록→감시→좌석 발견→알림 흐름만 눌러보는 가상 시연으로 이동합니다. 둘 다 실제 좌석 조회·예약·결제는 아닙니다.
           </span>
         </Link>
       </section>
@@ -323,8 +323,8 @@ export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
         )}
         {!status?.jobsEnabled && <p className="mt-1 text-white/40">감시 작업 기능이 서버에서 아직 활성화되지 않았습니다.</p>}
         {(providerUnavailable || !status?.jobsEnabled) && (
-          <Link href="/demo" className="mt-2 inline-flex items-center gap-1.5 font-bold text-[#ffad62] underline underline-offset-2">
-            <Sparkles className="size-3.5" /> Demo Showcase에서 전체 흐름 가상 시연 보기
+          <Link href="/demo" className="mt-2 inline-flex min-h-11 items-center gap-1.5 font-bold text-[#ffad62] underline underline-offset-2">
+            <Sparkles className="size-3.5" /> 취소표 감시 가상 시연 보기
           </Link>
         )}
       </div>
