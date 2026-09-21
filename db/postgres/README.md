@@ -30,7 +30,7 @@ psql "postgres:///railflow_dev" -f db/postgres/migrations/0001_init.sql
 | `watch_job_history` | `lib/watch/types.ts` `WatchJobHistoryEntry` |
 | `notification_deliveries` | `lib/watch/types.ts` `NotificationDelivery` |
 | `consent_history` | `lib/watch/types.ts` `ConsentHistoryEntry` |
-| `audit_events` | `lib/watch/types.ts` `AuditEvent` |
+| `audit_events` | `lib/audit/types.ts` `AuditEvent` (shared by `lib/auth` and `lib/watch`) |
 
 ## What a real adapter needs to implement
 

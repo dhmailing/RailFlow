@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
 
+import { getAuditStore } from "@/lib/audit/store";
 import { isAuthStoreUsable } from "@/lib/auth/feature-flags";
 import { authErrorResponse, authJson, errorResponse, signupRateLimiter } from "@/lib/auth/http";
 import { hashPassword } from "@/lib/auth/password";
@@ -49,6 +50,10 @@ export async function POST(request: NextRequest) {
     const passwordHash = await hashPassword(parsed.data.password);
     const user = await store.createUser(parsed.data.email, passwordHash);
     const session = await store.createSession(user.id, SESSION_TTL_MS);
+    // §2(2차) 재검토: 계정과 세션이 모두 성공적으로 만들어진 뒤에만 기록한다
+    // -- 이메일 중복 등으로 가입이 실패한 요청은 여기 도달하지 않는다.
+    // 이메일 원문·비밀번호·세션 토큰은 metadata에 절대 넣지 않는다.
+    getAuditStore().record(user.id, "user_signup", null, null);
     // 세션 토큰은 JSON 본문으로 절대 반환하지 않는다 -- httpOnly 쿠키로만
     // 전달한다 (§2 검토사항).
     const response = authJson({ user, expiresAt: session.expiresAt }, { status: 201 });

@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
 
+import { getAuditStore } from "@/lib/audit/store";
 import { isAuthStoreUsable } from "@/lib/auth/feature-flags";
 import { authErrorResponse, authJson, errorResponse, loginRateLimiter } from "@/lib/auth/http";
 import { getDummyPasswordHash, verifyPassword } from "@/lib/auth/password";
@@ -58,6 +59,10 @@ export async function POST(request: NextRequest) {
     // 세션 고정(session fixation) 방지: 로그인 성공 시 항상 새 세션을 서버가
     // 발급한다 -- 클라이언트가 세션 토큰을 지정할 방법 자체가 없다.
     const session = await store.createSession(record.id, SESSION_TTL_MS);
+    // §2(2차) 재검토: 자격 증명 검증과 새 세션 생성이 모두 성공한 뒤에만
+    // 기록한다 -- 비밀번호가 틀린 시도는 이 줄에 도달하지 않는다(위에서
+    // 이미 AuthError를 던지고 끝난다).
+    getAuditStore().record(record.id, "user_login", null, null);
     const response = authJson({
       user: { id: record.id, email: record.email, createdAt: record.createdAt },
       expiresAt: session.expiresAt,
