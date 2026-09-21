@@ -27,6 +27,7 @@ const STATUS_BY_CODE: Record<AutomationErrorCode, number> = {
   NOT_CONFIGURED: 503,
   OFFICIAL_INTEGRATION_REQUIRED: 503,
   AUTOMATION_TARGET_NOT_ALLOWED: 503,
+  RUNTIME_NOT_SUPPORTED: 503,
   INVALID_TRANSITION: 409,
   JOBS_DISABLED: 503,
   DUPLICATE_JOB: 409,
@@ -49,6 +50,10 @@ export function automationErrorResponse(error: unknown) {
   if (error instanceof AutomationError) {
     return errorResponse(STATUS_BY_CODE[error.code] ?? 500, error.code, error.message);
   }
+  // Unrecognized errors are still logged server-side (never to the client,
+  // and never including request bodies/cookies) so a real bug never looks
+  // identical to an expected AutomationError in server logs.
+  console.error("[automation] unexpected error", error);
   return errorResponse(500, "AUTOMATION_FAILED", "자동화 작업 처리 중 오류가 발생했습니다.");
 }
 

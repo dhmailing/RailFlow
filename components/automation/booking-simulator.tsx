@@ -99,7 +99,16 @@ export default function BookingSimulator() {
     setBusyListingId(listingId);
     try {
       const response = await fetch(`/api/automation/mock-site/listings/${listingId}/purchase-click`, { method: "POST" });
-      if (response.ok) setClickedByListing((current) => ({ ...current, [listingId]: true }));
+      if (response.ok) {
+        setClickedByListing((current) => ({ ...current, [listingId]: true }));
+        // seat-status의 data-purchase-clicked는 status(서버에서 마지막으로
+        // 가져온 값)를 clicked 로컬 state보다 우선한다(아래 렌더링) --
+        // 클릭 후 다시 조회하지 않으면 이 속성이 계속 stale한 "false"로
+        // 남아, 실제 Playwright 자동화(mock-browser-provider.ts의
+        // waitForAttribute)가 절대 만족되지 않는 값을 기다리다 타임아웃하는
+        // 실제 결함이 있었다 -- 클릭 성공 즉시 서버 상태를 다시 가져온다.
+        void checkStatus(listingId);
+      }
     } finally {
       setBusyListingId(null);
     }
