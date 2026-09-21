@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import dynamic from "next/dynamic";
 import {
   ArrowLeftRight,
@@ -11,6 +12,7 @@ import {
   LoaderCircle,
   RefreshCw,
   Search,
+  Sparkles,
   Ticket,
   TrainFront,
   UserRound,
@@ -92,8 +94,18 @@ export default function Home() {
   const [isInstalled, setIsInstalled] = useState(false);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const sessionCheckedRef = useRef(false);
 
+  // §10 검토: 로그인이 필요한 화면(자동예약/마이페이지)이 실제로 열릴 때만
+  // 세션을 확인하는 lazy 방식. 예매 탭만 보는 비로그인 사용자는 애초에
+  // /api/auth/session을 호출하지 않으므로, 항상 예상되는 401이라도 메인
+  // 화면 첫 로드에서 발생시키지 않는다. 한 번 확인한 뒤에는(로그인/로그아웃
+  // 등으로 authUser가 바뀌는 경우를 제외하고) 탭을 오갈 때마다 다시 부르지
+  // 않는다.
   useEffect(() => {
+    if (activeTab !== "automation" && activeTab !== "settings") return;
+    if (sessionCheckedRef.current) return;
+    sessionCheckedRef.current = true;
     let cancelled = false;
     (async () => {
       try {
@@ -113,7 +125,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeTab]);
 
   useEffect(() => {
     const restoreFrame = window.requestAnimationFrame(() => {
@@ -443,7 +455,7 @@ export default function Home() {
                       </Button>
                       <div className="mt-3 flex flex-wrap gap-3">
                         <Button variant="ghost" onClick={resetConditions}>검색 조건 초기화</Button>
-                        <Button variant="ghost" onClick={()=>{resetConditions();setStationOptions([]);setStationLoading(true);setStationError("");setMode(mode==="live"?"demo":"live");}}>{mode==="live"?"데모 체험":"실제 조회로 전환"}</Button>
+                        <Button variant="ghost" onClick={()=>{resetConditions();setStationOptions([]);setStationLoading(true);setStationError("");setMode(mode==="live"?"demo":"live");}}>{mode==="live"?"샘플 시간표 보기":"실제 조회로 전환"}</Button>
                       </div>
                       {!departure || !arrival ? <p className="mt-2 text-sm text-white/60">출발역과 도착역을 선택해주세요.</p> : departure===arrival ? <p role="alert" className="mt-2 text-sm text-orange-300">출발역과 도착역은 서로 다르게 선택해주세요.</p> : null}
                       {stationError && <div role="alert" className="mt-3 text-sm text-orange-300">{stationError}<Button variant="ghost" onClick={()=>{setStationLoading(true);setStationRetry(v=>v+1);}}>역 목록 다시 불러오기</Button></div>}
@@ -454,8 +466,20 @@ export default function Home() {
                     <BellRing className="mt-0.5 size-5 shrink-0 text-[#ff9b3f]" />
                     {mode === "live"
                       ? "운행시간과 운임은 공식 공공데이터입니다. 좌석 잔여와 예약은 아직 코레일+에서 확인합니다."
-                      : "데모 체험 모드입니다. 표시되는 열차와 예약 결과는 실제가 아닙니다."}
+                      : "샘플 시간표 모드입니다. 표시되는 열차와 예약 결과는 실제가 아닙니다."}
                   </div>
+
+                  <Link
+                    href="/demo"
+                    className="mt-3 flex items-center gap-3 rounded-2xl border border-[#ff8a1f]/25 bg-[#ff8a1f]/[0.06] p-4 text-sm leading-6 text-white/60 transition hover:border-[#ff8a1f]/40"
+                  >
+                    <Sparkles className="mt-0.5 size-5 shrink-0 text-[#ff9b3f]" />
+                    <span>
+                      <span className="font-bold text-[#ffad62]">취소표 감시 가상 시연</span>
+                      <br />
+                      여기서는 열차 시간표·운임을 조회하고, 이 링크는 취소표 감시 등록부터 좌석 발견·알림까지의 흐름을 로그인 없이 눌러보는 가상 시연으로 이동합니다. 둘 다 실제 좌석 조회·예약·결제는 아닙니다.
+                    </span>
+                  </Link>
                 </div>
 
                 <div className="min-w-0">
