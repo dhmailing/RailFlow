@@ -76,6 +76,15 @@ export type DemoJobState = {
   notifications: DemoNotificationRecord[];
   createdAt: string;
   updatedAt: string;
+  // 경과 시간 계산 전용 필드(재검토 §1). READY 동안 후보를 고르며 머문
+  // 시간은 감시 경과 시간에 포함하지 않는다 -- startedAt은 사용자가
+  // "가상 감시 시작"을 눌러 REGISTER가 적용된 순간(READY -> REGISTERED)에만
+  // 설정되고, 그 전에는 항상 null이다. endedAt은 FINISHED/CANCELLED로
+  // 전이하는 순간에만 설정되며, 그 값이 고정된 뒤에는 더 이상 흐르지
+  // 않는다 -- 그래야 완료/중단 후에도 경과 시간이 0으로 되돌아가지 않는다
+  // (lib/demo/reducer.ts의 computeElapsedSeconds 참고).
+  startedAt: string | null;
+  endedAt: string | null;
 };
 
 export const DEMO_STORAGE_KEY = "railflow-demo-showcase-v1";

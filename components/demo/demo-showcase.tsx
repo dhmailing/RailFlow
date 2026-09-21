@@ -29,7 +29,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Toaster } from "@/components/ui/sonner";
 import { OFFICIAL_BOOKING_URL } from "@/lib/demo/scenarios";
-import { createDefaultDemoState, demoReducer, type DemoAction } from "@/lib/demo/reducer";
+import { computeElapsedSeconds, createDefaultDemoState, demoReducer, type DemoAction } from "@/lib/demo/reducer";
 import { createDemoTimerController } from "@/lib/demo/timer";
 import { clearDemoState, readDemoState, writeDemoState } from "@/lib/demo/storage";
 import type { DemoCandidate, DemoIntervalSeconds, DemoStatus } from "@/lib/demo/types";
@@ -125,10 +125,11 @@ export default function DemoShowcase() {
     return () => window.clearInterval(id);
   }, [state.status]);
 
-  const elapsedSeconds = useMemo(() => {
-    if (!ACTIVE_STATUSES.includes(state.status)) return 0;
-    return Math.max(0, Math.floor((nowTick - new Date(state.createdAt).getTime()) / 1000));
-  }, [nowTick, state.createdAt, state.status]);
+  // startedAt/endedAt이 진실이고 nowTick은 화면 갱신용 트리거일 뿐이다 --
+  // FINISHED/CANCELLED에서는 endedAt이 이미 고정돼 있으므로 nowTick이 더
+  // 이상 갱신되지 않아도(§위 setInterval이 멈춤) 값이 0으로 되돌아가지
+  // 않는다.
+  const elapsedSeconds = useMemo(() => computeElapsedSeconds(state, nowTick), [state, nowTick]);
 
   const resetDemo = () => {
     timerRef.current.clear();
@@ -156,17 +157,18 @@ export default function DemoShowcase() {
           </div>
           <div className="flex items-center gap-2 border-t border-white/[0.06] bg-[#ff8a1f]/[0.08] px-4 py-2.5 text-xs font-bold text-[#ffad62] sm:px-6">
             <Sparkles className="size-4 shrink-0" />
-            가상 시연 · 실제 좌석 조회 및 예약이 아닙니다
+            가상 시연 · 실제 좌석 조회·예약·결제를 수행하지 않습니다
           </div>
         </header>
 
         <div className="space-y-5 px-4 pt-5 sm:px-6">
           <div>
             <p className="text-sm font-semibold text-[#ff9b3f]">Demo Showcase</p>
-            <h1 className="mt-1 text-2xl font-extrabold tracking-[-0.03em]">취소표 감시 · 알림 가상 시연</h1>
+            <h1 className="mt-1 text-2xl font-extrabold tracking-[-0.03em]">취소표 감시 가상 시연</h1>
             <p className="mt-2 text-sm leading-6 text-white/45">
-              실제 코레일/SR/TAGO 서버와 통신하지 않는 브라우저 전용 시연입니다. 아래 흐름을 눌러보며 등록부터 좌석 발견,
-              공식 예매 안내까지 전체 과정을 확인할 수 있어요.
+              실제 코레일/SR/TAGO 서버와 통신하지 않는 브라우저 전용 시연입니다. 메인 화면의 열차 시간표 조회(실제 또는
+              샘플 데이터)와 달리, 여기서는 취소표 감시 등록부터 좌석 발견, 공식 예매 안내까지의 흐름만 가상으로
+              보여줍니다.
             </p>
           </div>
 
