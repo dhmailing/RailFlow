@@ -55,6 +55,22 @@ export default defineConfig(async () => {
       ...(managedLinux ? { host: "0.0.0.0", allowedHosts: ["terminal.local"] } : {}),
       ...(isCodexSeatbeltSandbox ? { watch: { useFsEvents: false, usePolling: true } } : {}),
     },
+    ssr: {
+      // playwright-core ships a self-contained CJS bundle with internal
+      // lazy `require()`s (e.g. chromium-bidi) that rolldown cannot resolve
+      // statically. It is a devDependency used only by
+      // lib/automation/providers/mock-browser-provider.ts, gated to never
+      // run outside local/dev Node processes (see
+      // docs/V0.7-AUTOMATION-BOUNDARY.md) -- excluding it from bundling here
+      // only fixes the build; it does not make Playwright usable inside the
+      // Cloudflare Workers runtime this build targets.
+      external: ["playwright", "playwright-core"],
+    },
+    build: {
+      rolldownOptions: {
+        external: ["playwright", "playwright-core"],
+      },
+    },
     plugins: [
       vinext(),
       sites({ mockAuth: !managedLinux }),

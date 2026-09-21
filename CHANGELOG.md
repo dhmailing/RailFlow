@@ -102,3 +102,28 @@
 - 메인 화면과 자동예약(취소표 감시) 화면에 Demo Showcase로 연결되는 안내 링크를 추가했다. 기존 "데모 체험"(시간표 조회 모드 전환) 버튼의 동작은 그대로 유지했다.
 - 로그인이 필요한 화면(자동예약/마이페이지)이 실제로 열릴 때만 `/api/auth/session`을 확인하도록 바꿨다 — 예매 탭만 보는 비로그인 사용자는 더 이상 첫 화면 로드에서 불필요한 401을 발생시키지 않는다.
 - 실제 운영 인프라(PostgreSQL/Queue/Worker/알림 채널/공식 좌석 Provider) 전환 계획을 `docs/V0.6-OPERATIONS-PLAN.md`에 문서화했다 — 이번 PR은 이 계획을 실행하지 않았고, `SEAT_AVAILABILITY_PROVIDER` 등 기존 fail-closed 기본값은 전혀 바뀌지 않았다.
+
+## v0.7 — 자동 좌석조회·예약 매크로 시뮬레이터 (검증 중, PR 병합 전)
+
+**실제 코레일·SRT 좌석 조회·클릭·로그인·결제는 이번에도 구현하지 않았다.** 이번 작업은 그 대신, RailFlow 자신이 만든 가짜 예매 사이트를 대상으로 실제 브라우저 자동화(Playwright)가 "조건 등록 → 자동 감시 → 좌석 발견 → 자동 클릭 → 자동 예약 → 성공 알림"까지 실제로 동작함을 시연하는 기능이다.
+
+- 새 공개 경로 `/demo/booking-simulator`(Mock 예매 사이트)를 추가했다. 열차 목록·일반실/특실 잔여·매진 여부·구매 버튼·예약 처리·가상 예약번호(`RF-XXXXXXXX`) 발급·결제기한·예약 취소를 서버 상태로 관리하며, 결정론적 시나리오 3개(항상 매진 / 3번째 조회에서 일반실 발생 / 5번째 조회에서 특실 발생)를 시드한다.
+- `자동예약` 탭에 실제 서버 기반 매크로 작업 카드(등록 폼 + 진행 상태·좌석 상태·자동 구매클릭 여부·예약 결과·결제기한 카운트다운·중지/재감시/삭제)를 추가했다. 기존 "취소표 감시"(`WatchJobsPanel`)는 그대로 유지되며, 대체되지 않았다.
+- 17단계 작업 상태 기계(`SCHEDULED→...→PAYMENT_PENDING→COMPLETED`, 실패/종료 8종)와, 구매 클릭 사실과 예약 성공 사실을 분리 기록해 실제 예약 성공 응답 없이는 절대 "좌석 확보"로 표시하지 않는 원칙을 구현했다.
+- 두 서버 프로세스(Worker)가 동시에 같은 작업을 처리해도 예약이 정확히 1건만 이뤄지도록 원자적 스텝 선점(펜싱 토큰)과 이중 idempotency(사이트 자체 + 작업 저장소)를 구현했다. 성공한 후보가 생기면 다른 후보 감시는 즉시(다음 tick부터) 자동 중단된다.
+- 자동화의 "1~5초 간격"은 RailFlow 자신의 API를 다시 호출하는 주기일 뿐이며, 실제 외부 철도 사이트에 대한 클릭 간격이나 탐지회피 패턴이 아니다. 그런 목적의 랜덤 지연·패턴 변형 기능도 구현하지 않았다.
+- 자동화 Worker가 열 수 있는 주소를 화이트리스트로 강제하는 `host-guard.ts`를 추가했다: `localhost`/`127.0.0.1`와 이 배포 자신의 Vercel 호스트명(`VERCEL_URL`, 앱 설정으로 위조 불가)만 허용되며, 탐색 전/리디렉션 후 두 번 재검증한다. 실제 운영(Production, `VERCEL_ENV`로 판정)에서는 이 값과 무관하게 자동화 기능 전체가 항상 거부된다.
+- Playwright는 `data-testid` locator(`train-result`/`seat-status`/`purchase-button`/`reserve-button`/`reservation-result`)만 사용한다 — 좌표 클릭, OCR, 이미지 인식은 쓰지 않는다. 비밀번호·쿠키·세션 토큰·카드정보는 어디에도 기록하지 않는다.
+- 실제 코레일·SR 자동화, 비공개 API 연동, CAPTCHA/대기열 우회, 기기·IP 위장, 탐지회피, 실제 결제·카드정보 저장은 이번에도 구현하지 않았으며, 이런 자동화가 실제로 필요해지면 구현하지 않고 중단·보고하는 것을 원칙으로 유지한다.
+- Cloudflare Workers 배포 경로(`pnpm build`/`pnpm dev`)는 브라우저 프로세스를 띄울 수 없는 런타임이라, 이 시뮬레이터의 Playwright 자동화는 그 경로에서 실행될 수 없다 — 이 제약과 실제 Android 출시 전 남은 작업·공식 Provider 전환 승인 조건을 `docs/V0.7-AUTOMATION-BOUNDARY.md`, `docs/ANDROID-RELEASE-ROADMAP.md`에 문서화했다.
+- 이 검증 과정에서 실제 회귀를 발견해 수정했다: `lib/automation/provider.ts`가 `playwright`를 항상 즉시 import하고 있어, 이 레포의 로컬 개발 서버(Cloudflare Workers 런타임)에서는 자동화 Provider를 기본값(`unavailable`, 운영 환경 포함)으로 둬도 자동화 라우트 전체가 500으로 죽는 문제가 있었다. Playwright(`mock-browser` Provider)를 실제로 선택했을 때만 동적으로 불러오고, 그 로드가 실패하면(이 런타임처럼 애초에 불가능한 경우) 처리되지 않은 크래시 대신 정상적인 오류 응답으로 변환하도록 수정했다.
+
+### 이어받기 세션 — 실제 시연 가능성 검증 및 보완 (2026-09-21, 코드 변경 포함)
+
+- **실제로 로그인이 되는 로컬 Node.js 서버**(이 레포의 Cloudflare Workers 개발 경로가 아니라 `next dev`)에서 실제로 회원가입 → 자동화 작업 등록 → 실제 Playwright 브라우저 자동화 → 좌석 발견 → 자동 구매클릭 → 자동 예약까지 전체 흐름을 처음부터 끝까지 돌려봤고, 그 과정에서 실제 결함을 하나 더 발견·수정했다: `components/automation/booking-simulator.tsx`의 구매 클릭 버튼이 클릭 성공 후 좌석 상태를 다시 불러오지 않아, 화면의 `data-purchase-clicked` 속성이 계속 낡은 값(`false`)에 머물러 있었다. 실제 자동화 Worker(`mock-browser-provider.ts`)는 이 속성이 `"true"`가 될 때까지 기다리므로, 이 결함이 있는 동안에는 **자동 구매클릭이 실제로는 한 번도 성공할 수 없었다**. 클릭 성공 시 상태를 즉시 다시 불러오도록 수정한 뒤, 실제로 가상 예약번호와 결제기한이 발급되는 것까지 확인했다.
+- 또 다른 구조적 원인도 확인했다: Vercel Preview 배포는 `next build`로 만들어지는데, Next.js는 `VERCEL_ENV`와 무관하게 이 빌드를 항상 `NODE_ENV=production`으로 만든다. 기존 계정 저장소(`AUTH_STORE`, v0.5)는 `NODE_ENV`로 판정해 Preview에서도 항상 막혀 있었으므로, 지금까지는 Preview에서 회원가입 자체가 불가능했고, 이 때문에 로그인이 필요한 자동예약 탭 전체를 Preview에서 시연할 수 없었다(계정 저장소의 이 정책 자체는 v0.5의 의도적인 설계이며 이번에도 바꾸지 않았다).
+- 위 문제를 우회하기 위해 **로그인이 전혀 필요 없는 새 공개 시연 경로 `/demo/booking-automation`**을 추가했다. 서버 계정·자동화 저장소·실제 API를 전혀 쓰지 않는 완전히 독립된 클라이언트 전용 모듈(`lib/automation-demo/**`)이며, 조건 등록 후 "자동 감시 시작"을 누르면 좌석 발견부터 가상 예약 성공까지 자동으로 진행되고 결제 완료만 사용자가 직접 누른다. 새로고침해도 브라우저 `sessionStorage`에서 상태가 복원된다.
+- 실제 Playwright 브라우저 자동화가 로드 불가능한 런타임(예: 이 저장소의 Cloudflare Workers 경로)에서도 동일한 시연 시나리오를 안정적으로 보여줄 수 있도록, 브라우저를 쓰지 않는 새 Provider `mock-direct`를 추가했다(RailFlow 자신의 Mock 예매 사이트 저장소를 직접 호출, 외부 요청 없음). `mock-browser` Provider가 실행 불가능한 런타임에서 로드에 실패하면 이제 `RUNTIME_NOT_SUPPORTED`라는 이름으로 명확히 구분되는 오류를 반환한다(이전에는 다른 설정 오류와 같은 코드를 썼다).
+- `@playwright/test`를 추가해 실제 브라우저로 두 가지를 검증하는 E2E 테스트를 작성하고 실제로 통과시켰다: (1) 공개 시연(`/demo/booking-automation`)이 조건 등록부터 예약 성공·새로고침 복원·결제 완료까지 실제로 동작하는지, (2) 실제 `mock-browser` Provider 코드가 진짜 Chromium으로 Mock 예매 사이트를 열어 구매·예약을 완료하고, 실제 코레일 도메인으로의 접근은 차단하는지.
+- `scripts/verify-automation-demo.cjs`(신규)로 새 공개 시연 모듈의 상태 전이·라운드로빈 좌석 시나리오·경과 시간·sessionStorage 검증·모듈 경계(기존 인증/철도/자동화 코드 미참조)를 오프라인으로 검증했다. `scripts/verify-booking-simulator.cjs`에는 `mock-direct` Provider와 `RUNTIME_NOT_SUPPORTED` 코드에 대한 검증을 추가했다.
+- 실제 Vercel Preview 서버리스 함수가 어느 런타임(Node.js/Edge)으로 자동화 API를 서비스하는지, 그리고 Preview에서 `mock-browser`가 실제로 동작하는지는 이번에도 이 세션의 네트워크 제약으로 직접 확인하지 못했다 — `docs/V0.7-PREVIEW-DEMO-AUDIT.md`에 확인한 것과 확인하지 못한 것을 정직하게 구분해 기록했다.
