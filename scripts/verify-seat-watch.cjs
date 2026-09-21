@@ -65,6 +65,7 @@ const DEV_STORES = { AUTH_STORE: 'memory', WATCH_STORE: 'memory' };
 
 const authSession = load('lib/auth/session.ts');
 const authMemoryStore = load('lib/auth/memory-store.ts');
+const auditMemoryStore = load('lib/audit/memory-store.ts');
 const { assertTrustedOrigin } = load('lib/security/origin-guard.ts');
 const { canTransition, hasExpired } = load('lib/watch/state-machine.ts');
 const { assertSimulationAllowed } = load('lib/watch/simulation-guard.ts');
@@ -91,6 +92,7 @@ const providerStatusRoute = load('app/api/watch-jobs/provider-status/route.ts');
 
 function resetAll() {
   authMemoryStore.__resetAuthStoreForTests();
+  auditMemoryStore.__resetAuditStoreForTests();
   watchStore.__resetWatchStoreForTests();
   watchQueue.__resetQueueForTests();
   __resetInMemoryNotificationsForTests();
@@ -632,7 +634,7 @@ async function main() {
     assert.equal(rawDump.includes('fcm-flow-token'), false);
     assert.equal(rawDump.includes('webpush-flow-token'), false);
     assert.equal(rawDump.includes('flow@example.com'), false, '이메일 원문도 목록 JSON에 있으면 안 된다');
-    const auditDump = JSON.stringify(watchStore.listAuditEvents(user.user.id));
+    const auditDump = JSON.stringify(auditMemoryStore.memoryAuditStore.listForUser(user.user.id));
     assert.equal(auditDump.includes('fcm-flow-token'), false, '감사 로그에도 원문 토큰이 있으면 안 된다');
   });
 
@@ -740,6 +742,89 @@ async function main() {
     assert.equal(reclaim.entry.attemptCount, 2, '재획득은 시도 횟수를 증가시켜야 한다');
   });
 
+  // -- §1 검토사항(2차): claim fencing token -- 뒤늦게(stale) 도착한 완료가
+  // 더 최신 claim(다른 Worker가 재획득한 것)을 덮어쓰면 안 된다. 실제
+  // 타이머 기반 비동기 경쟁을 흉내 내지 않고, 저장소 함수(claimNotification/
+  // completeNotificationClaim)를 직접 순서대로 호출해 결정적으로 재현한다.
+  await withEnv({ ...DEV_STORES, NODE_ENV: 'test', NOTIFICATION_CLAIM_LEASE_MS: '50' }, async () => {
+    resetAll();
+    const user = await signup('fencing@example.com', 'block-fencing');
+    const jobId = watchStore.createWatchJob({ ...baseJobInput(), userId: user.user.id }, 'mock').id;
+    const claimInput = { userId: user.user.id, watchJobId: jobId, candidateId: null, channel: 'email', deviceId: 'device-fencing', watchCycle: 0, eventType: 'seat_found', idempotencyKey: 'fencing-test' };
+
+    // 1) Worker A가 claim한다.
+    const claimA = watchStore.claimNotification(claimInput);
+    assert.equal(claimA.outcome, 'claimed');
+    const tokenA = claimA.claimToken;
+
+    // 2) A의 어댑터 호출이 오래 걸리는 상황을 흉내 낸다 -- 아직 완료를
+    // 부르지 않은 채로 lease가 만료될 때까지 기다린다.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    // 3) Worker B가 재획득한다 -- A와 반드시 다른 claimToken을 받아야 한다.
+    const claimB = watchStore.claimNotification(claimInput);
+    assert.equal(claimB.outcome, 'claimed');
+    const tokenB = claimB.claimToken;
+    assert.notEqual(tokenB, tokenA, '재획득은 항상 새 claimToken을 발급해야 한다');
+
+    // 4) A가 뒤늦게 완료를 시도한다(이제는 stale) -- 거부되어야 하고, 저장된
+    // 행을 전혀 건드리면 안 된다.
+    const staleComplete = watchStore.completeNotificationClaim(user.user.id, 'fencing-test', tokenA, { delivered: true, deliveryRef: 'from-A' });
+    assert.equal(staleComplete.applied, false);
+    assert.equal(staleComplete.reason, 'stale_claim');
+    assert.equal(staleComplete.entry.status, 'sending', 'stale completion 이후에도 행은 B가 보유 중인 sending 상태 그대로여야 한다');
+    assert.equal(staleComplete.entry.claimToken, tokenB, 'stale completion이 B의 claimToken을 덮어쓰면 안 된다');
+    // A가 실패로 완료를 시도해도 마찬가지로 거부돼야 한다(성공/실패 둘 다 막힘).
+    const staleFailure = watchStore.completeNotificationClaim(user.user.id, 'fencing-test', tokenA, { delivered: false, deliveryRef: null, error: 'late failure from A' });
+    assert.equal(staleFailure.applied, false);
+    assert.equal(staleFailure.reason, 'stale_claim');
+
+    // 5) B가 올바른 토큰으로 완료한다 -- 적용돼야 한다.
+    const realComplete = watchStore.completeNotificationClaim(user.user.id, 'fencing-test', tokenB, { delivered: true, deliveryRef: 'from-B' });
+    assert.equal(realComplete.applied, true);
+    assert.equal(realComplete.entry.status, 'delivered');
+    assert.equal(realComplete.entry.deliveryRef, 'from-B');
+    assert.equal(realComplete.entry.claimToken, null, '완료 후에는 claimToken을 정리해야 한다');
+
+    // 6) 최종 저장 상태는 B의 결과여야 한다(A의 결과가 아님).
+    const finalRows = watchStore.listNotificationDeliveries(user.user.id, jobId).filter((d) => d.idempotencyKey === 'fencing-test');
+    assert.equal(finalRows.length, 1, '동일 idempotencyKey에 대해 행이 하나만 있어야 한다');
+    assert.equal(finalRows[0].deliveryRef, 'from-B');
+
+    // 7) 완료된(delivered) 행은 다시 claim할 수 없다.
+    const afterDeliveredClaim = watchStore.claimNotification(claimInput);
+    assert.equal(afterDeliveredClaim.outcome, 'duplicate');
+
+    // 8) 완료 후 A가 뒤늦게 또 완료를 시도해도(이제 status가 delivered) 여전히 거부된다.
+    const staleAfterDelivered = watchStore.completeNotificationClaim(user.user.id, 'fencing-test', tokenA, { delivered: true, deliveryRef: 'from-A-too-late' });
+    assert.equal(staleAfterDelivered.applied, false);
+    assert.equal(staleAfterDelivered.entry.deliveryRef, 'from-B', '이미 delivered인 행이 stale 완료로 덮어써지면 안 된다');
+
+    // 9) 서로 다른 사용자/기기/채널/watchCycle은 독립적으로 claim된다(서로 간섭하지 않음).
+    const otherDeviceClaim = watchStore.claimNotification({ ...claimInput, deviceId: 'device-fencing-2', idempotencyKey: 'fencing-test-device2' });
+    const otherChannelClaim = watchStore.claimNotification({ ...claimInput, channel: 'fcm', idempotencyKey: 'fencing-test-channel2' });
+    const otherCycleClaim = watchStore.claimNotification({ ...claimInput, watchCycle: 1, idempotencyKey: 'fencing-test-cycle2' });
+    assert.equal(otherDeviceClaim.outcome, 'claimed');
+    assert.equal(otherChannelClaim.outcome, 'claimed');
+    assert.equal(otherCycleClaim.outcome, 'claimed');
+    assert.notEqual(otherDeviceClaim.claimToken, tokenB);
+    assert.notEqual(otherChannelClaim.claimToken, tokenB);
+    assert.notEqual(otherCycleClaim.claimToken, tokenB);
+  });
+
+  // -- production은 NOTIFICATION_CLAIM_LEASE_MS 테스트 오버라이드를 절대
+  // 읽지 않는다 -- 항상 실제 30초 lease를 쓴다(fail-closed). --
+  await withEnv({ NODE_ENV: 'production', NOTIFICATION_CLAIM_LEASE_MS: '50' }, () => {
+    const claimInput = {
+      userId: 'prod-lease-test-user', watchJobId: 'job-x', candidateId: null,
+      channel: 'email', deviceId: 'device-x', watchCycle: 0, eventType: 'seat_found', idempotencyKey: 'prod-lease-key',
+    };
+    const claimed = watchStore.claimNotification(claimInput);
+    assert.equal(claimed.outcome, 'claimed');
+    const leaseMs = new Date(claimed.entry.lockExpiresAt).getTime() - new Date(claimed.entry.lockedAt).getTime();
+    assert.ok(leaseMs > 1000, `production은 짧은 테스트 lease(50ms)를 무시하고 항상 긴(30초) lease를 써야 한다 (실제: ${leaseMs}ms)`);
+  });
+
   // -- Production: Mock simulation is always blocked; ordinary job CRUD is not
   // (a user may legitimately register a watch before any Provider exists), as
   // long as the store itself is usable (dev/test here) --
@@ -779,7 +864,9 @@ async function main() {
     assert.equal((await afterProd.json()).job.status, job.status, 'the production-blocked simulate call must not have mutated the job');
   });
 
-  // -- account deletion cascades to watch data + pseudonymizes audit events --
+  // -- account deletion cascades to watch data + pseudonymizes audit events
+  // (including the auth-side user_signup/device_registered/watch_job_created
+  // events that are now genuinely recorded -- §3 2차 검토) --
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   await withEnv({ ...DEV_STORES, SEAT_AVAILABILITY_PROVIDER: 'mock', ENABLE_SEAT_WATCH_JOBS: 'true', NODE_ENV: 'test' }, async () => {
     resetAll();
@@ -787,41 +874,45 @@ async function main() {
     const userB = await signup('delete-me-b@example.com', 'block-delete-b');
     const deviceRes = await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'delete-me@example.com' }, cookie: user.cookie, clientId: 'block-delete-device' }));
     const device = (await deviceRes.json()).device;
-    // userB는 device_registered 감사 이벤트를 하나 남겨 가명 검증에 쓸 이벤트가
-    // 있게 한다(현재 코드는 user_signup 자체를 감사 로그에 남기지 않는다).
     await devicesRoute.POST(req('http://test/api/devices', { method: 'POST', body: { channel: 'email', token: 'delete-me-b@example.com' }, cookie: userB.cookie, clientId: 'block-delete-device-b' }));
     const createRes = await watchJobsRoute.POST(req('http://test/api/watch-jobs', { method: 'POST', body: baseJobInput({ notificationMethods: [{ channel: 'email', deviceId: device.id }] }), cookie: user.cookie, clientId: 'block-delete-create' }));
     assert.equal(createRes.status, 201);
     assert.equal(watchStore.listWatchJobs(user.user.id).length, 1);
-    const auditCountBefore = watchStore.listAuditEvents(user.user.id).length;
-    assert.ok(auditCountBefore > 1, '가명 일치 검증을 위해 이 사용자는 감사 이벤트가 2개 이상이어야 한다(signup + device + job 등)');
+    // user_signup + device_registered + watch_job_created = 3 events so far.
+    const auditCountBefore = auditMemoryStore.memoryAuditStore.listForUser(user.user.id).length;
+    assert.equal(auditCountBefore, 3, 'signup + device 등록 + 감시작업 등록으로 3개의 감사 이벤트가 있어야 한다');
     const originalUserId = user.user.id;
 
     const deleteRes = await accountRoute.DELETE(req('http://test/api/auth/account', { method: 'DELETE', body: { password: FAKE_PASSWORD }, cookie: user.cookie, clientId: 'block-delete-confirm' }));
     assert.equal(deleteRes.status, 200);
     assert.equal(watchStore.listWatchJobs(user.user.id).length, 0, 'account deletion must remove the user\'s watch jobs');
-    assert.equal(watchStore.listAuditEvents(originalUserId).length, 0, '가명처리 후에는 원래 userId로 감사 이벤트를 찾을 수 없어야 한다');
+    assert.equal(auditMemoryStore.memoryAuditStore.listForUser(originalUserId).length, 0, '가명처리 후에는 원래 userId로 감사 이벤트를 찾을 수 없어야 한다');
 
     // §1 재검토: 가명은 실제 UUID 형식이어야 하고(Postgres audit_events.user_id
     // uuid 컬럼과 타입이 맞아야 함), 원래 userId와 달라야 하며, 같은 사용자의
-    // 모든 이벤트는 같은 가명을 공유해야 한다. userB는 아직 삭제되지 않았으므로
-    // (자신의 실제 userId를 그대로 갖고 있어 UUID 접두사 매칭에 걸리지 않음)
-    // 지금 시점에 UUID 형식 userId를 가진 이벤트는 전부 방금 삭제된 A의 것이다.
-    const pseudonymEventsA = watchStore.__listAllAuditEventsForTests().filter((e) => UUID_RE.test(e.userId));
+    // 모든 이벤트(방금 추가된 user_deleted 포함)는 같은 가명을 공유해야 한다.
+    // userB는 아직 삭제되지 않았으므로(자신의 실제 userId를 그대로 갖고 있어
+    // UUID 형식 매칭에 걸리지 않음) 지금 시점에 UUID 형식 userId를 가진
+    // 이벤트는 전부 방금 삭제된 A의 것이다.
+    const pseudonymEventsA = auditMemoryStore.__listAllAuditEventsForTests().filter((e) => UUID_RE.test(e.userId));
     const candidatePseudonyms = new Set(pseudonymEventsA.map((e) => e.userId));
     assert.equal(candidatePseudonyms.size, 1, '삭제된 사용자의 모든 감사 이벤트는 정확히 하나의 공통 가명을 공유해야 한다');
     const pseudonymA = [...candidatePseudonyms][0];
     assert.ok(UUID_RE.test(pseudonymA), `가명은 유효한 UUID 형식이어야 한다: ${pseudonymA}`);
     assert.notEqual(pseudonymA, originalUserId, '가명은 원래 userId와 달라야 한다');
-    assert.equal(pseudonymEventsA.length, auditCountBefore, '같은 사용자의 모든 이벤트가 동일한 가명으로 치환되어야 한다(개수 보존)');
+    assert.equal(pseudonymEventsA.length, auditCountBefore + 1, '기존 3개 + user_deleted 1개 = 4개 모두 동일한 가명으로 치환되어야 한다');
+    assert.ok(
+      pseudonymEventsA.some((e) => e.action === 'user_deleted'),
+      'user_deleted 이벤트 자체도 다른 이전 이벤트들과 같은 가명을 공유해야 한다(가명처리보다 먼저 기록됐으므로)',
+    );
 
     // 두 번째 계정을 삭제해 서로 다른 사용자가 서로 다른 가명을 받는지 확인한다.
     const originalUserIdB = userB.user.id;
-    const auditCountBeforeB = watchStore.listAuditEvents(originalUserIdB).length;
+    const auditCountBeforeB = auditMemoryStore.memoryAuditStore.listForUser(originalUserIdB).length;
     assert.ok(auditCountBeforeB > 0);
     const deleteResB = await accountRoute.DELETE(req('http://test/api/auth/account', { method: 'DELETE', body: { password: FAKE_PASSWORD }, cookie: userB.cookie, clientId: 'block-delete-confirm-b' }));
     assert.equal(deleteResB.status, 200);
-    const pseudonymEventsB = watchStore.__listAllAuditEventsForTests().filter((e) => UUID_RE.test(e.userId) && e.userId !== pseudonymA);
+    const pseudonymEventsB = auditMemoryStore.__listAllAuditEventsForTests().filter((e) => UUID_RE.test(e.userId) && e.userId !== pseudonymA);
     const candidatePseudonymsB = new Set(pseudonymEventsB.map((e) => e.userId));
     assert.equal(candidatePseudonymsB.size, 1, '두 번째 삭제 계정도 자신만의 단일 가명을 가져야 한다');
     const pseudonymB = [...candidatePseudonymsB][0];
@@ -829,6 +920,79 @@ async function main() {
 
     const afterDelete = await sessionRoute.GET(req('http://test/api/auth/session', { cookie: user.cookie }));
     assert.equal(afterDelete.status, 401, 'the deleted account\'s session must no longer be valid');
+  });
+
+  // === §3(2차) 재검토: 인증 감사 이벤트(user_signup/login/logout/deleted) 실제 기록 ===
+  await withEnv({ ...DEV_STORES, NODE_ENV: 'test' }, async () => {
+    resetAll();
+
+    // signup 성공 -> user_signup 정확히 1개. 중복 이메일 재가입(실패) 시도는 이벤트를 남기지 않는다.
+    const user = await signup('audit-events@example.com', 'block-audit-signup');
+    assert.equal(user.status, 201);
+    let events = auditMemoryStore.memoryAuditStore.listForUser(user.user.id);
+    assert.deepEqual(events.map((e) => e.action), ['user_signup']);
+
+    const dupSignup = await signup('audit-events@example.com', 'block-audit-signup');
+    assert.equal(dupSignup.status, 409);
+    events = auditMemoryStore.memoryAuditStore.listForUser(user.user.id);
+    assert.equal(events.length, 1, '중복 가입 실패는 성공 이벤트를 남기면 안 된다');
+
+    // 잘못된 비밀번호 로그인 -> 이벤트 없음. 올바른 로그인 -> user_login 정확히 1개 추가.
+    const badLogin = await login('audit-events@example.com', 'wrong-password-xyz', 'block-audit-login-bad');
+    assert.equal(badLogin.status, 401);
+    events = auditMemoryStore.memoryAuditStore.listForUser(user.user.id);
+    assert.equal(events.length, 1, '잘못된 비밀번호 로그인은 성공 이벤트를 남기면 안 된다');
+
+    const goodLogin = await login('audit-events@example.com', FAKE_PASSWORD, 'block-audit-login-ok');
+    assert.equal(goodLogin.status, 200);
+    events = auditMemoryStore.memoryAuditStore.listForUser(user.user.id);
+    assert.deepEqual(events.map((e) => e.action), ['user_signup', 'user_login']);
+
+    // 로그아웃 -> user_logout 정확히 1개 추가. 같은(이미 삭제된) 세션으로 재호출하거나
+    // 세션이 전혀 없는 로그아웃은 중복/가짜 이벤트를 남기지 않는다(정책: 유효한 세션을
+    // 실제로 무효화한 경우에만 기록).
+    const logoutRes = await logoutRoute.POST(req('http://test/api/auth/logout', { method: 'POST', cookie: goodLogin.cookie, clientId: 'block-audit-logout' }));
+    assert.equal(logoutRes.status, 200);
+    events = auditMemoryStore.memoryAuditStore.listForUser(user.user.id);
+    assert.deepEqual(events.map((e) => e.action), ['user_signup', 'user_login', 'user_logout']);
+
+    const repeatLogout = await logoutRoute.POST(req('http://test/api/auth/logout', { method: 'POST', cookie: goodLogin.cookie, clientId: 'block-audit-logout-again' }));
+    assert.equal(repeatLogout.status, 200, '로그아웃 자체는 세션이 이미 없어도 항상 200을 반환해야 한다(idempotent)');
+    events = auditMemoryStore.memoryAuditStore.listForUser(user.user.id);
+    assert.equal(events.length, 3, '이미 무효화된 세션으로의 재호출은 감사 이벤트를 추가로 남기면 안 된다');
+
+    const noSessionLogout = await logoutRoute.POST(req('http://test/api/auth/logout', { method: 'POST', clientId: 'block-audit-logout-nosession' }));
+    assert.equal(noSessionLogout.status, 200);
+    events = auditMemoryStore.memoryAuditStore.listForUser(user.user.id);
+    assert.equal(events.length, 3, '쿠키가 아예 없는 로그아웃 호출도 감사 이벤트를 남기면 안 된다');
+
+    // 다시 로그인해 계정 삭제 흐름을 검증한다: 잘못된 재인증은 이벤트를 남기지 않고,
+    // 올바른 재인증만 user_deleted를 남긴다.
+    const reLogin = await login('audit-events@example.com', FAKE_PASSWORD, 'block-audit-relogin');
+    assert.equal(reLogin.status, 200);
+
+    const badDelete = await accountRoute.DELETE(req('http://test/api/auth/account', { method: 'DELETE', body: { password: 'wrong-one' }, cookie: reLogin.cookie, clientId: 'block-audit-delete-bad' }));
+    assert.equal(badDelete.status, 401);
+    events = auditMemoryStore.memoryAuditStore.listForUser(user.user.id);
+    assert.equal(events.filter((e) => e.action === 'user_deleted').length, 0, '재인증 실패는 user_deleted를 남기면 안 된다');
+
+    const goodDelete = await accountRoute.DELETE(req('http://test/api/auth/account', { method: 'DELETE', body: { password: FAKE_PASSWORD }, cookie: reLogin.cookie, clientId: 'block-audit-delete-ok' }));
+    assert.equal(goodDelete.status, 200);
+    // 삭제 후에는 (가명처리로) 원래 userId로 조회되지 않는다.
+    assert.equal(auditMemoryStore.memoryAuditStore.listForUser(user.user.id).length, 0);
+    const pseudonymized = auditMemoryStore.__listAllAuditEventsForTests().filter((e) => UUID_RE.test(e.userId));
+    assert.equal(new Set(pseudonymized.map((e) => e.userId)).size, 1);
+    assert.deepEqual(
+      pseudonymized.map((e) => e.action).sort(),
+      ['user_deleted', 'user_login', 'user_login', 'user_logout', 'user_signup'].sort(),
+      '가입/로그인 2회/로그아웃/삭제 = 총 5개 이벤트가 모두 같은 가명으로 보존돼야 한다',
+    );
+
+    // §감사 이벤트 직렬화 결과에 이메일·비밀번호·세션 토큰이 없어야 한다.
+    const dump = JSON.stringify(pseudonymized);
+    assert.equal(dump.includes('audit-events@example.com'), false);
+    assert.equal(dump.includes(FAKE_PASSWORD), false);
+    assert.equal(dump.includes(goodLogin.cookie), false);
   });
 
   console.log = originalLog;
