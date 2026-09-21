@@ -1,5 +1,5 @@
-const CACHE_NAME = "railflow-v3";
-const APP_SHELL = ["/manifest.webmanifest", "/favicon.svg", "/icon-192.svg"];
+const CACHE_NAME = "railflow-v4";
+const APP_SHELL = ["/manifest.webmanifest", "/favicon.svg", "/icon-192.svg", "/offline"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
@@ -29,7 +29,9 @@ self.addEventListener("fetch", (event) => {
       .catch(() =>
         caches.match(event.request).then((cached) => {
           if (cached) return cached;
-          if (event.request.mode === "navigate") return caches.match("/");
+          if (event.request.mode === "navigate") {
+            return caches.match("/").then((shell) => shell ?? caches.match("/offline"));
+          }
           return Response.error();
         }),
       ),

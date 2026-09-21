@@ -6,7 +6,6 @@ import {
   ArrowLeftRight,
   BellRing,
   CalendarDays,
-  CheckCircle2,
   Clock3,
   ExternalLink,
   LoaderCircle,
@@ -27,6 +26,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster } from "@/components/ui/sonner";
 import { stationNames } from "@/lib/rail/stations";
 import type { RailProviderMode, TrainResult, TrainSearchResponse } from "@/lib/rail/types";
+import type { AuthUser } from "@/components/auth-panel";
 import { toast } from "sonner";
 
 type Reservation = TrainResult & {
@@ -43,7 +43,8 @@ type InstallPromptEvent = Event & {
 
 const stations: string[] = [...stationNames];
 const SettingsView = dynamic(()=>import("@/components/rail-settings"),{loading:()=> <p role="status">설정 불러오는 중</p>});
-const ReservationJobsPanel = dynamic(()=>import("@/components/reservation-jobs"),{loading:()=> <p role="status">v0.4 예약 작업 상태 불러오는 중</p>});
+const AuthPanel = dynamic(()=>import("@/components/auth-panel"),{loading:()=> <p role="status">로그인 상태 불러오는 중</p>});
+const WatchJobsPanel = dynamic(()=>import("@/components/watch-jobs"),{loading:()=> <p role="status">취소표 감시 상태 불러오는 중</p>});
 
 function kstDate(offsetDays: number) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -89,6 +90,30 @@ export default function Home() {
   const [storageReady, setStorageReady] = useState(false);
   const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
   const [isInstalled, setIsInstalled] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch("/api/auth/session", { cache: "no-store" });
+        if (response.ok) {
+          const payload = (await response.json()) as { user: AuthUser };
+          if (!cancelled) setAuthUser(payload.user);
+        } else if (!cancelled) {
+          setAuthUser(null);
+        }
+      } catch {
+        if (!cancelled) setAuthUser(null);
+      } finally {
+        if (!cancelled) setAuthLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const restoreFrame = window.requestAnimationFrame(() => {
@@ -245,26 +270,10 @@ export default function Home() {
     };
 
     setReservations((current) => [reservation, ...current]);
-    toast.success(train.availability === "available" ? "예약 가능한 좌석을 확보했어요" : "자동예약을 시작했어요", {
-      description: `${train.number} · ${train.depart} 출발`,
+    toast.info("자동예약 탭에서 취소표 감시를 등록해주세요", {
+      description: `${train.number} · ${train.depart} 출발 · 실시간 좌석 감시는 로그인 후 자동예약 탭에서 조건을 등록해야 시작됩니다.`,
     });
     setActiveTab("automation");
-  };
-
-  const removeReservation = (id: string) => {
-    setReservations((current) => current.filter((reservation) => reservation.id !== id));
-    toast("자동예약을 중지했어요");
-  };
-
-  const simulateSeat = (id: string) => {
-    setReservations((current) =>
-      current.map((reservation) =>
-        reservation.id === id ? { ...reservation, status: "secured" } : reservation,
-      ),
-    );
-    toast.success("좌석 확보 테스트 성공", {
-      description: "실제 연동 단계에서는 이때 강한 알림과 결제 안내를 보냅니다.",
-    });
   };
 
   const installApp = async () => {
@@ -456,26 +465,26 @@ export default function Home() {
             </TabsContent>
 
             <TabsContent value="automation" className="m-0">
-              <AutomationView reservations={reservations} onRemove={removeReservation} onSimulate={simulateSeat} onFind={() => setActiveTab("booking")} />
-              {activeTab === "automation" && (
-                <div className="mx-auto max-w-3xl">
-                  <ReservationJobsPanel />
-                </div>
-              )}
+              {activeTab === "automation" && <WatchJobsPanel user={authUser} />}
             </TabsContent>
 
             <TabsContent value="settings" className="m-0">
-              {activeTab === "settings" && <SettingsView
-                notifications={notifications}
-                setNotifications={setNotifications}
-                autoLogin={autoLogin}
-                setAutoLogin={setAutoLogin}
-                autoPay={autoPay}
-                setAutoPay={setAutoPay}
-                isInstalled={isInstalled}
-                canInstall={Boolean(installPrompt)}
-                onInstall={installApp}
-              />}
+              {activeTab === "settings" && (
+                <div className="mx-auto max-w-3xl space-y-4">
+                  <AuthPanel user={authUser} loading={authLoading} onAuthChanged={setAuthUser} />
+                  <SettingsView
+                    notifications={notifications}
+                    setNotifications={setNotifications}
+                    autoLogin={autoLogin}
+                    setAutoLogin={setAutoLogin}
+                    autoPay={autoPay}
+                    setAutoPay={setAutoPay}
+                    isInstalled={isInstalled}
+                    canInstall={Boolean(installPrompt)}
+                    onInstall={installApp}
+                  />
+                </div>
+              )}
             </TabsContent>
           </div>
 
@@ -605,59 +614,3 @@ function TrainResults({
   );
 }
 
-function AutomationView({ reservations, onRemove, onSimulate, onFind }: { reservations: Reservation[]; onRemove: (id: string) => void; onSimulate: (id: string) => void; onFind: () => void }) {
-  return (
-    <section className="mx-auto max-w-3xl">
-      <div className="mb-6 flex items-end justify-between">
-        <div><p className="mb-1 text-sm font-semibold text-[#ff9b3f]">자동예약</p><h1 className="text-2xl font-extrabold tracking-[-0.035em] md:text-3xl">진행 중인 작업</h1></div>
-        {!!reservations.length && <span className="text-sm text-white/42">총 {reservations.length}건</span>}
-      </div>
-
-      {!reservations.length ? (
-        <div className="grid min-h-[520px] place-items-center rounded-[28px] border border-white/[0.08] bg-[#0d0d0d]/80 p-6 text-center">
-          <div className="max-w-sm">
-            <span className="mx-auto grid size-20 place-items-center rounded-[26px] border border-white/10 bg-white/[0.035] text-white/25"><Ticket className="size-9" /></span>
-            <h2 className="mt-6 text-xl font-extrabold">진행 중인 자동예약이 없습니다</h2>
-            <p className="mt-2 text-sm leading-6 text-white/40">매진된 열차도 괜찮아요. 원하는 열차를 선택해 자동예약을 시작하세요.</p>
-            <Button onClick={onFind} className="mt-6 h-12 rounded-xl bg-[#ff8a1f] px-6 font-extrabold text-black hover:bg-[#ff9d45]">열차 찾기</Button>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          {reservations.map((reservation) => (
-            <article key={reservation.id} className="overflow-hidden rounded-[24px] border border-white/10 bg-[#111] shadow-xl">
-              <div className={`h-1 ${reservation.status === "secured" ? "bg-emerald-400" : "bg-[#ff8a1f]"}`} />
-              <div className="p-5">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      {reservation.status === "secured" ? <CheckCircle2 className="size-5 text-emerald-400" /> : <RefreshCw className="size-5 animate-[spin_3s_linear_infinite] text-[#ff8a1f]" />}
-                      <span className={`text-sm font-extrabold ${reservation.status === "secured" ? "text-emerald-300" : "text-[#ffad62]"}`}>{reservation.status === "secured" ? "좌석 확보" : "좌석 확인 중"}</span>
-                    </div>
-                    <h2 className="mt-3 text-xl font-extrabold">{reservation.route}</h2>
-                    <p className="mt-1 text-sm text-white/42">{reservation.date} · {reservation.number}</p>
-                  </div>
-                  <div className="text-right"><strong className="text-xl">{reservation.depart}</strong><p className="mt-1 text-xs text-white/38">출발</p></div>
-                </div>
-
-                {reservation.status === "secured" ? (
-                  <div className="mt-5 rounded-2xl border border-emerald-400/20 bg-emerald-400/[0.07] p-4">
-                    <div className="flex items-center justify-between gap-4">
-                      <div><p className="text-sm font-bold text-emerald-300">결제 대기</p><p className="mt-1 text-xs text-white/45">실제 연동 시 코레일+ 결제 화면으로 연결됩니다.</p></div>
-                      <Button disabled className="rounded-xl bg-emerald-400 text-black opacity-60">결제 연결</Button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="mt-5 grid grid-cols-2 gap-3">
-                    <Button variant="outline" onClick={() => onSimulate(reservation.id)} className="h-11 rounded-xl border-[#ff8a1f]/35 bg-[#ff8a1f]/5 text-[#ffad62] hover:bg-[#ff8a1f]/10 hover:text-[#ffc58d]">동작 테스트</Button>
-                    <Button variant="outline" onClick={() => onRemove(reservation.id)} className="h-11 rounded-xl border-white/10 bg-transparent text-white/55 hover:bg-white/[0.05] hover:text-white">자동예약 중지</Button>
-                  </div>
-                )}
-              </div>
-            </article>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
