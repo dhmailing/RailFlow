@@ -45,7 +45,7 @@ type AutomationJob = {
 };
 
 type ProviderStatus = {
-  seatAutomationProvider: "unavailable" | "mock-browser" | "official";
+  seatAutomationProvider: "unavailable" | "mock-browser" | "mock-direct" | "official";
   jobsEnabled: boolean;
   mockBookingSiteEnabled: boolean;
   realProductionEnvironment: boolean;
@@ -295,6 +295,10 @@ export default function AutomationJobsPanel({ user }: { user: AuthUser | null })
         {!status?.jobsEnabled && !status?.realProductionEnvironment && <p className="mt-1 text-white/40">서버에서 아직 활성화되지 않았습니다.</p>}
         <Link href="/demo/booking-simulator" className="mt-2 inline-flex min-h-11 items-center gap-1.5 font-bold text-[#ffad62] underline underline-offset-2">
           <Sparkles className="size-3.5" /> Mock 예매 사이트 직접 열어보기
+        </Link>
+        <br />
+        <Link href="/demo/booking-automation" className="mt-1 inline-flex min-h-11 items-center gap-1.5 font-bold text-[#ffad62] underline underline-offset-2">
+          <Sparkles className="size-3.5" /> 로그인 없이 자동 좌석조회·예약 매크로 시연 보기
         </Link>
       </div>
 

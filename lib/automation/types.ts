@@ -38,6 +38,7 @@ export type AutomationErrorCode =
   | "NOT_CONFIGURED"
   | "OFFICIAL_INTEGRATION_REQUIRED"
   | "AUTOMATION_TARGET_NOT_ALLOWED"
+  | "RUNTIME_NOT_SUPPORTED"
   | "INVALID_TRANSITION"
   | "JOBS_DISABLED"
   | "DUPLICATE_JOB"
@@ -107,7 +108,7 @@ export type AutomationJobHistoryEntry = {
 export type AutomationJob = AutomationJobInput & {
   id: string;
   status: JobStatus;
-  provider: "mock-browser" | "unavailable" | "official";
+  provider: "mock-browser" | "mock-direct" | "unavailable" | "official";
   // True for every job this PR can ever create (only "mock-browser" jobs are
   // ever created -- the API boundary blocks "official" exactly like v0.4's
   // ReservationJob does). Carried on the job itself so the API/UI contract
@@ -225,7 +226,7 @@ export type AutomationProviderCapabilities = {
 // PR -- see lib/automation/providers/official-stub-provider.ts, which always
 // throws OFFICIAL_INTEGRATION_REQUIRED and never calls fetch/Playwright.
 export interface SeatAutomationProvider {
-  readonly name: "mock-browser" | "unavailable" | "official";
+  readonly name: "mock-browser" | "mock-direct" | "unavailable" | "official";
   capabilities(): AutomationProviderCapabilities;
   searchAvailability(input: AvailabilityInput): Promise<AvailabilityResult>;
   clickPurchase(input: PurchaseInput): Promise<PurchaseClickResult>;

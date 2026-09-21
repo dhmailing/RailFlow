@@ -41,7 +41,7 @@ function validateCandidates(candidates: AutomationCandidate[]): void {
   }
 }
 
-export function createJob(input: AutomationJobInput, provider: "mock-browser" | "unavailable" | "official"): AutomationJob {
+export function createJob(input: AutomationJobInput, provider: "mock-browser" | "mock-direct" | "unavailable" | "official"): AutomationJob {
   validateCandidates(input.candidates);
   if (hasActiveDuplicate(input)) {
     throw new AutomationError("DUPLICATE_JOB", "같은 사용자·날짜·구간·인원의 자동화 작업이 이미 진행 중입니다.");

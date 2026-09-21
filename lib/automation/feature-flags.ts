@@ -1,6 +1,6 @@
 import "server-only";
 
-export type SeatAutomationProviderFlag = "unavailable" | "mock-browser" | "official";
+export type SeatAutomationProviderFlag = "unavailable" | "mock-browser" | "mock-direct" | "official";
 
 function readEnv(name: string): string {
   return (process.env[name] ?? "").trim().toLowerCase();
@@ -10,7 +10,7 @@ function readEnv(name: string): string {
 // safest option ("unavailable"), never to something more permissive.
 export function getSeatAutomationProviderFlag(): SeatAutomationProviderFlag {
   const value = readEnv("SEAT_AUTOMATION_PROVIDER");
-  return value === "mock-browser" || value === "official" ? value : "unavailable";
+  return value === "mock-browser" || value === "mock-direct" || value === "official" ? value : "unavailable";
 }
 
 export function isSeatAutomationJobsEnabled(): boolean {
@@ -32,7 +32,8 @@ export function isRealProductionEnvironment(): boolean {
 }
 
 export function isAutomationProviderUsable(): boolean {
-  return getSeatAutomationProviderFlag() === "mock-browser" && isSeatAutomationJobsEnabled() && !isRealProductionEnvironment();
+  const flag = getSeatAutomationProviderFlag();
+  return (flag === "mock-browser" || flag === "mock-direct") && isSeatAutomationJobsEnabled() && !isRealProductionEnvironment();
 }
 
 // The Mock booking site itself (lib/automation/mock-booking-site/**,
