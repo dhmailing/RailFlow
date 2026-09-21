@@ -1,12 +1,13 @@
 import "server-only";
 
+import { getAuditStore } from "@/lib/audit/store";
 import { validateCandidates } from "@/lib/watch/candidate-validation";
 import { isWatchStoreUsable } from "@/lib/watch/feature-flags";
 import { assertTransition, isTerminalStatus } from "@/lib/watch/state-machine";
 import {
   WatchError,
-  type AuditAction,
-  type AuditEvent,
+  type CompleteNotificationClaimOutcome,
+  type CompleteNotificationClaimResult,
   type ConsentHistoryEntry,
   type ConsentType,
   type Device,
@@ -33,7 +34,6 @@ const devices = new Map<string, Device>();
 // NotificationDelivery doc comment in types.ts. Keyed by `${userId}::${idempotencyKey}`.
 const notificationOutbox = new Map<string, NotificationDelivery>();
 const consentHistory: ConsentHistoryEntry[] = [];
-const auditEvents: AuditEvent[] = [];
 
 function generateId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
@@ -105,7 +105,7 @@ export function registerDevice(userId: string, channel: NotificationChannel, tok
     lastSeenAt: now,
   };
   devices.set(device.id, device);
-  recordAuditEvent(userId, "device_registered", device.id, { channel });
+  getAuditStore().record(userId, "device_registered", device.id, { channel });
   return device;
 }
 
@@ -170,7 +170,7 @@ export function createWatchJob(input: WatchJobInput, seatProvider: "unavailable"
     history: [{ at: now, from: null, to: "REGISTERED", reason: "감시 작업 등록" }],
   };
   watchJobs.set(job.id, job);
-  recordAuditEvent(input.userId, "watch_job_created", job.id, { departure: input.departure, arrival: input.arrival, date: input.date });
+  getAuditStore().record(input.userId, "watch_job_created", job.id, { departure: input.departure, arrival: input.arrival, date: input.date });
   return job;
 }
 
@@ -213,7 +213,7 @@ export function transitionWatchJob(
     history: [...job.history, { at: now, from: job.status, to, reason }],
   };
   watchJobs.set(id, updated);
-  if (to === "COMPLETED") recordAuditEvent(userId, "watch_job_completed", id, null);
+  if (to === "COMPLETED") getAuditStore().record(userId, "watch_job_completed", id, null);
   return updated;
 }
 
@@ -227,7 +227,7 @@ export function recordAttempt(id: string, userId: string, error: { code: WatchEr
 
 export function cancelWatchJob(id: string, userId: string, reason = "사용자 취소"): WatchJob {
   const job = transitionWatchJob(id, userId, "CANCELLED", reason);
-  recordAuditEvent(userId, "watch_job_cancelled", id, null);
+  getAuditStore().record(userId, "watch_job_cancelled", id, null);
   return job;
 }
 
@@ -243,18 +243,34 @@ export function cancelWatchJob(id: string, userId: string, reason = "사용자 �
 // 확인과 저장 사이의 await 구간에서 두 호출 모두 확인을 통과할 수 있었다 --
 // 이 claim은 그 구간을 없앤다(확인이자 저장이 같은 동기 연산).
 //
-// 실제 Postgres 구현에서는 이 함수 하나가 다음 SQL과 같아야 한다(자세한
-// 설계와 조건부 재획득 UPDATE는 db/postgres/migrations/0001_init.sql 참고):
-//   insert into notification_deliveries (...) values (...)
+// (재검토, fencing token) claim만으로는 부족한 경우가 하나 남는다: Worker A가
+// claim한 뒤 Adapter 호출이 오래 걸려 lease가 만료되면, Worker B가 같은
+// 알림을 재획득할 수 있다. 그 상태에서 A가 뒤늦게 completeNotificationClaim()을
+// 부르면, A는 "자신이 여전히 이 알림의 주인"이라고 착각한 채 B의 새 claim
+// 상태나 결과를 덮어쓸 수 있다. 이를 막기 위해 claim마다(최초 claim과 모든
+// 재획득마다) 무작위 claimToken을 새로 발급하고, completeNotificationClaim()은
+// 현재 저장된 토큰과 정확히 일치할 때만 갱신을 적용한다 -- 아래 참고.
+//
+// 실제 Postgres 구현에서는 claim이 다음 SQL과 같아야 한다(전체 CAS 조건과
+// 재획득 UPDATE는 db/postgres/migrations/0001_init.sql 참고):
+//   insert into notification_deliveries (..., claim_token) values (..., $token)
 //   on conflict (user_id, idempotency_key) do nothing
 //   returning *;
 //   -- 0행이 반환되면 이미 존재하는 행을 select해 duplicate/already_claimed/
-//   -- 재시도 가능 여부를 판단하고, 필요하면 조건부 UPDATE로 재획득을 시도한다.
+//   -- 재시도 가능 여부를 판단하고, 필요하면 조건부 UPDATE(새 claim_token 발급
+//   -- 포함)로 재획득을 시도한다.
+function generateClaimToken(): string {
+  return crypto.randomUUID();
+}
+
 // 테스트 전용 오버라이드: 기본 30초 lease는 자동화된 테스트에서 실시간으로
 // 기다리기엔 너무 길다. NOTIFICATION_CLAIM_LEASE_MS를 지정하면(예:
-// scripts/verify-seat-watch.cjs) 그 값을 쓰고, 그 외에는 항상 30초다 --
-// 운영 코드 경로는 이 환경변수를 설정하지 않으므로 영향이 없다.
+// scripts/verify-seat-watch.cjs) 그 값을 쓰지만, **Production에서는 이
+// 오버라이드를 절대 읽지 않는다** -- 운영 환경에 실수로 이 환경변수가
+// 설정돼도(혹은 공격자가 다른 경로로 주입해도) lease가 비정상적으로
+// 짧아지거나 길어지는 것을 막기 위한 fail-closed 처리다.
 function getClaimLeaseMs(): number {
+  if (process.env.NODE_ENV === "production") return 30_000;
   const raw = Number(process.env.NOTIFICATION_CLAIM_LEASE_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
 }
@@ -271,15 +287,18 @@ function isRetryDue(nextAttemptAt: string | null, now: number): boolean {
   return nextAttemptAt === null || new Date(nextAttemptAt).getTime() <= now;
 }
 
-function reclaimEntry(existing: NotificationDelivery, now: number): NotificationDelivery {
-  return {
+function reclaimEntry(existing: NotificationDelivery, now: number): { entry: NotificationDelivery; claimToken: string } {
+  const claimToken = generateClaimToken();
+  const entry: NotificationDelivery = {
     ...existing,
     status: "sending",
     attemptCount: existing.attemptCount + 1,
+    claimToken,
     lockedAt: nowIso(now),
     lockExpiresAt: nowIso(now + getClaimLeaseMs()),
     updatedAt: nowIso(now),
   };
+  return { entry, claimToken };
 }
 
 export function claimNotification(input: NotificationClaimInput): NotificationClaim {
@@ -288,6 +307,7 @@ export function claimNotification(input: NotificationClaimInput): NotificationCl
   const existing = notificationOutbox.get(scope);
 
   if (!existing) {
+    const claimToken = generateClaimToken();
     const entry: NotificationDelivery = {
       id: generateId("notif"),
       ...input,
@@ -296,13 +316,14 @@ export function claimNotification(input: NotificationClaimInput): NotificationCl
       attemptCount: 1,
       lastError: null,
       nextAttemptAt: null,
+      claimToken,
       lockedAt: nowIso(now),
       lockExpiresAt: nowIso(now + getClaimLeaseMs()),
       createdAt: nowIso(now),
       updatedAt: nowIso(now),
     };
     notificationOutbox.set(scope, entry);
-    return { outcome: "claimed", entry };
+    return { outcome: "claimed", entry, claimToken };
   }
 
   if (existing.status === "delivered" || existing.status === "skipped_unverified") {
@@ -315,41 +336,54 @@ export function claimNotification(input: NotificationClaimInput): NotificationCl
       // 다른 호출자가 지금 이 알림을 처리 중이다 -- 절대 어댑터를 또 호출하지 않는다.
       return { outcome: "already_claimed", entry: existing };
     }
-    // lease가 만료됨(예: Worker가 중간에 죽음) -- 방치된 claim으로 보고 재획득한다.
-    const reclaimed = reclaimEntry(existing, now);
-    notificationOutbox.set(scope, reclaimed);
-    return { outcome: "claimed", entry: reclaimed };
+    // lease가 만료됨(예: Worker가 중간에 죽음) -- 방치된 claim으로 보고 새
+    // claimToken으로 재획득한다. 이전 토큰을 쥔 Worker가 뒤늦게 돌아와도
+    // completeNotificationClaim()의 토큰 비교에서 걸러진다.
+    const { entry, claimToken } = reclaimEntry(existing, now);
+    notificationOutbox.set(scope, entry);
+    return { outcome: "claimed", entry, claimToken };
   }
 
   // existing.status === "failed" | "pending"
   if (!isRetryDue(existing.nextAttemptAt, now)) {
     return { outcome: "already_claimed", entry: existing };
   }
-  const reclaimed = reclaimEntry(existing, now);
-  notificationOutbox.set(scope, reclaimed);
-  return { outcome: "claimed", entry: reclaimed };
+  const { entry, claimToken } = reclaimEntry(existing, now);
+  notificationOutbox.set(scope, entry);
+  return { outcome: "claimed", entry, claimToken };
 }
 
-export type CompleteNotificationClaimResult = {
-  delivered: boolean;
-  deliveryRef: string | null;
-  error?: string | null;
-};
-
-// claimNotification()이 "claimed"를 반환했을 때만 호출한다 -- 실제 Adapter
-// 호출이 끝난 뒤 그 claim을 종료 상태로 전이시킨다. 실패 시 nextAttemptAt을
-// 즉시(지금)로 설정해 다음 Worker tick이 바로 재시도를 claim할 수 있게 한다
-// (이 인메모리 구현은 지수 백오프를 모델링하지 않는다 -- 실제 어댑터가
-// 백오프가 필요하면 이 값을 미래 시각으로 설정하면 된다).
+// claimNotification()이 "claimed"를 반환했을 때만, 그때 받은 claimToken과
+// 함께 호출한다 -- 실제 Adapter 호출이 끝난 뒤 그 claim을 종료 상태로
+// 전이시킨다.
+//
+// (재검토, fencing token) 현재 저장된 행의 status가 여전히 "sending"이고
+// claimToken이 정확히 일치할 때만 적용한다(applied: true). 그렇지 않으면
+// (다른 Worker가 이미 재획득했거나, 이미 delivered/failed로 끝났거나) 이
+// 호출은 저장된 행을 전혀 건드리지 않고 applied:false와 이유를 반환한다 --
+// 뒤늦게 도착한(stale) 완료가 더 최신 claim의 상태나 결과를 덮어쓰는 것을
+// 막는 것이 이 검사의 목적이다. 실패 시 nextAttemptAt을 즉시(지금)로
+// 설정해 다음 Worker tick이 바로 재시도를 claim할 수 있게 한다(이 인메모리
+// 구현은 지수 백오프를 모델링하지 않는다 -- 실제 어댑터가 백오프가 필요하면
+// 이 값을 미래 시각으로 설정하면 된다). 적용 여부와 무관하게 claimToken/
+// lease는 항상 정리한다(성공·실패 완료 후 claim을 남겨두지 않는다).
 export function completeNotificationClaim(
   userId: string,
   idempotencyKey: string,
+  claimToken: string,
   result: CompleteNotificationClaimResult,
-): NotificationDelivery {
+): CompleteNotificationClaimOutcome {
   const scope = `${userId}::${idempotencyKey}`;
   const existing = notificationOutbox.get(scope);
   if (!existing) {
-    throw new Error(`completeNotificationClaim called without a prior claim for ${idempotencyKey}`);
+    return { applied: false, reason: "not_claimed", entry: null };
+  }
+  if (existing.status !== "sending" || existing.claimToken !== claimToken) {
+    // Stale completion: 이 호출자는 더 이상 이 알림의 claim 소유자가 아니다
+    // (다른 Worker가 재획득했거나, 이미 완료됐다). 저장된 행을 절대 수정하지
+    // 않고, 현재(더 최신) 상태를 그대로 돌려준다. 비밀값은 여기 어디에도
+    // 없다 -- error 메시지는 호출자가 넘긴 구조화된 문자열뿐이다.
+    return { applied: false, reason: "stale_claim", entry: existing };
   }
   const now = Date.now();
   const updated: NotificationDelivery = {
@@ -358,17 +392,21 @@ export function completeNotificationClaim(
     deliveryRef: result.delivered ? result.deliveryRef : existing.deliveryRef,
     lastError: result.delivered ? null : (result.error ?? "알림 발송에 실패했습니다."),
     nextAttemptAt: result.delivered ? null : nowIso(now),
+    claimToken: null,
     lockedAt: null,
     lockExpiresAt: null,
     updatedAt: nowIso(now),
   };
   notificationOutbox.set(scope, updated);
-  return updated;
+  return { applied: true, entry: updated };
 }
 
 // §5 검토사항: 소유권이 확인되지 않은 수신처는 claim/lease 없이 곧바로 종료
 // 상태로 기록한다 -- 애초에 Adapter를 호출할 일이 없으므로 경쟁 조건도 없다.
 // 같은 키로 다시 호출되면(예: Worker 재실행) 기존 행을 그대로 반환한다.
+// 소유권이 확인되지 않은 수신처는 애초에 claim할 이유가 없다 -- 어댑터를
+// 호출할 일 자체가 없으므로 claimToken은 항상 null이다(NotificationClaimInput에는
+// claimToken을 받는 파라미터가 없다 -- 타입으로 강제).
 export function recordSkippedUnverified(input: NotificationClaimInput): NotificationDelivery {
   const scope = `${input.userId}::${input.idempotencyKey}`;
   const existing = notificationOutbox.get(scope);
@@ -382,6 +420,7 @@ export function recordSkippedUnverified(input: NotificationClaimInput): Notifica
     attemptCount: 0,
     lastError: null,
     nextAttemptAt: null,
+    claimToken: null,
     lockedAt: null,
     lockExpiresAt: null,
     createdAt: nowIso(now),
@@ -413,76 +452,33 @@ export function listConsentHistory(userId: string): ConsentHistoryEntry[] {
   return consentHistory.filter((c) => c.userId === userId);
 }
 
-// -- Audit events ----------------------------------------------------------------
-
-// metadata must never contain secrets, tokens, or raw notification
-// destinations -- callers pass only short descriptive strings (see the
-// call sites above). scripts/verify-seat-watch.cjs asserts no secret value
-// ever appears in an audit event.
-export function recordAuditEvent(userId: string, action: AuditAction, targetId: string | null, metadata: Record<string, string> | null): AuditEvent {
-  const event: AuditEvent = { id: generateId("audit"), userId, action, targetId, at: new Date().toISOString(), metadata };
-  auditEvents.push(event);
-  return event;
-}
-
-export function listAuditEvents(userId: string): AuditEvent[] {
-  return auditEvents.filter((e) => e.userId === userId);
-}
-
 // -- Account deletion ------------------------------------------------------------
 
-// §8 검토사항: AuditEvent는 보안 감사 무결성을 위해 계정 삭제 후에도
-// 보존하지만(§3-B), "userId만 남아 있으니 개인정보가 아니다"라고 단정하지
-// 않는다 -- userId 자체가 삭제된 계정과 다른 시스템(서버 로그 등)을 잇는
-// 식별자가 될 수 있다. 대신 원래 userId와 아무 관계가 없는 새 값으로 되돌릴
-// 수 없이 교체한다. 같은 사용자의 이벤트는 모두 같은 가명을 공유하므로
-// "삭제된 계정 하나의 활동 이력"이라는 감사 가치는 유지되지만, 그 가명에서
-// 원래 userId(따라서 이메일 등 계정 정보)로 역추적할 방법은 없다.
-//
-// (검토 재반영) 가명은 반드시 `crypto.randomUUID()`가 만드는 그대로의 UUID
-// 문자열이어야 한다 -- 이전 구현은 `deleted_<hex>` 형태의 접두사 문자열을
-// 썼는데, db/postgres/migrations의 `audit_events.user_id`는 `uuid not null`
-// 컬럼이라 그 값은 Postgres Adapter로 옮기면 타입 오류가 난다. 원래 userId와
-// 가명 UUID 사이의 매핑은 어디에도 저장하지 않는다 -- 저장하면 역추적이
-// 다시 가능해져 가명처리의 의미가 없어진다.
-function pseudonymizeAuditEventsForUser(userId: string): void {
-  const pseudonym = crypto.randomUUID();
-  for (let i = 0; i < auditEvents.length; i += 1) {
-    if (auditEvents[i].userId === userId) {
-      auditEvents[i] = { ...auditEvents[i], userId: pseudonym };
-    }
-  }
-}
-
 // Removes every row this module owns for `userId` (Devices, WatchJobs and
-// their history, NotificationDeliveries, ConsentHistory) and pseudonymizes
-// this user's AuditEvents (see pseudonymizeAuditEventsForUser above).
-// Documented in docs/V0.5-SEAT-WATCH.md. Runs unconditionally (not gated by
-// assertWatchStoreUsable): deleting a user's own data must never be blocked
-// by the same flag that blocks *creating new* fake demo data, and it is a
-// harmless no-op when nothing was ever created in this process.
+// their history, NotificationDeliveries, ConsentHistory). Deliberately does
+// NOT touch AuditEvents any more -- audit recording/pseudonymization moved
+// to lib/audit/ (재검토, §3), and the caller (app/api/auth/account/route.ts)
+// is responsible for calling the audit store's pseudonymizeForUser() as its
+// own explicit step, in the order documented there (record user_deleted ->
+// pseudonymize -> delete watch data -> delete the auth user). Runs
+// unconditionally (not gated by assertWatchStoreUsable): deleting a user's
+// own data must never be blocked by the same flag that blocks *creating
+// new* fake demo data, and it is a harmless no-op when nothing was ever
+// created in this process.
 export function deleteAllWatchDataForUser(userId: string): void {
   for (const [id, job] of watchJobs) if (job.userId === userId) watchJobs.delete(id);
   for (const [id, device] of devices) if (device.userId === userId) devices.delete(id);
   for (const [key, entry] of notificationOutbox) if (entry.userId === userId) notificationOutbox.delete(key);
   for (let i = consentHistory.length - 1; i >= 0; i -= 1) if (consentHistory[i].userId === userId) consentHistory.splice(i, 1);
-  pseudonymizeAuditEventsForUser(userId);
-}
-
-// Test-only: exposes every AuditEvent regardless of userId, so a test can
-// look up an account's events *by their post-deletion pseudonym* (which the
-// test only learns by scanning, since listAuditEvents(originalUserId)
-// deliberately returns nothing any more once pseudonymized).
-export function __listAllAuditEventsForTests(): AuditEvent[] {
-  return auditEvents.slice();
 }
 
 // Test-only: clears every in-memory table so scripts/verify-seat-watch.cjs
 // can run independent scenarios without cross-contaminating dedupe checks.
+// Audit events live in lib/audit/memory-store.ts now and have their own
+// __resetAuditStoreForTests().
 export function __resetWatchStoreForTests(): void {
   watchJobs.clear();
   devices.clear();
   notificationOutbox.clear();
   consentHistory.length = 0;
-  auditEvents.length = 0;
 }

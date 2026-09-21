@@ -205,6 +205,12 @@ export type NotificationDelivery = {
   // 호출자가 (Worker가 죽는 등으로 방치된) 이 claim을 재획득할 수 있다.
   lockedAt: string | null;
   lockExpiresAt: string | null;
+  // (재검토, fencing token) 현재 claim을 보유한 호출자만 아는 무작위 토큰.
+  // status가 "sending"일 때만 의미가 있고(그 claim을 완료할 자격의 증표),
+  // 완료(delivered/failed)되거나 애초에 claim된 적이 없으면(skipped_unverified)
+  // null이다. 새로 claim하거나 재획득할 때마다 새 값으로 교체된다 -- 아래
+  // claimNotification()/completeNotificationClaim() 주석 참고.
+  claimToken: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -222,10 +228,28 @@ export type NotificationClaimInput = {
 
 export type NotificationClaimOutcome = "claimed" | "duplicate" | "already_claimed";
 
-export type NotificationClaim = {
-  outcome: NotificationClaimOutcome;
-  entry: NotificationDelivery;
+// (재검토, fencing token) claim에 성공했을 때만 claimToken이 존재한다 --
+// discriminated union으로 강제해, 호출자가 "claimed"가 아닌 결과에서 실수로
+// 존재하지 않는 토큰을 완료 처리에 넘기는 실수를 컴파일 타임에 막는다.
+export type NotificationClaim =
+  | { outcome: "claimed"; entry: NotificationDelivery; claimToken: string }
+  | { outcome: "duplicate" | "already_claimed"; entry: NotificationDelivery };
+
+export type CompleteNotificationClaimResult = {
+  delivered: boolean;
+  deliveryRef: string | null;
+  error?: string | null;
 };
+
+// (재검토, fencing token) completeNotificationClaim()의 결과. claimToken이
+// 현재 저장된 값과 일치하고 상태가 아직 "sending"일 때만 applied:true다.
+// 그 외(다른 Worker가 이미 재획득했거나 이미 완료된 경우)는 applied:false와
+// 그 이유(reason)를 반환하고, 저장된 행은 절대 건드리지 않는다 -- 뒤늦게
+// 도착한 완료가 더 최신 claim의 결과를 덮어쓰는 것을 막는 것이 이 타입의
+// 존재 이유다.
+export type CompleteNotificationClaimOutcome =
+  | { applied: true; entry: NotificationDelivery }
+  | { applied: false; reason: "stale_claim" | "not_claimed"; entry: NotificationDelivery | null };
 
 export type ConsentType = "no_ticket_sale_disclaimer" | "notification_permission";
 
@@ -237,27 +261,10 @@ export type ConsentHistoryEntry = {
   at: string;
 };
 
-export type AuditAction =
-  | "user_signup"
-  | "user_login"
-  | "user_logout"
-  | "user_deleted"
-  | "watch_job_created"
-  | "watch_job_cancelled"
-  | "watch_job_completed"
-  | "device_registered";
-
-export type AuditEvent = {
-  id: string;
-  userId: string;
-  action: AuditAction;
-  targetId: string | null;
-  at: string;
-  // Never put secrets, tokens, or raw notification destinations in here --
-  // see lib/watch/store.ts's recordAuditEvent and scripts/verify-seat-watch.cjs's
-  // secret-leak assertion.
-  metadata: Record<string, string> | null;
-};
+// AuditAction/AuditEvent moved to lib/audit/types.ts (재검토, §3): both
+// lib/auth and lib/watch record into the same audit trail now, so the
+// type/storage boundary can't live inside this module any more -- see
+// lib/audit/types.ts's doc comment for why.
 
 // -- Provider/Adapter interfaces --------------------------------------------
 

@@ -78,3 +78,15 @@ v0.4의 ADR 0001과 동일한 결론이 v0.5의 취소표 감시에도 그대로
 최초 구현은 CSRF 방어를 위해 요청의 `Origin` 헤더 host를 그 요청 자체의 `Host` 헤더와 비교했다. 검토에서 지적된 결함 두 가지: (1) `Host` 헤더는 프록시/로드밸런서 설정에 따라 신뢰할 수 없을 수 있어, 공격자가 통제하는 `Host`와 그에 맞춘 `Origin`을 함께 보내면 우회 가능하다. (2) host만 비교하고 스킴(scheme)을 무시하면 `http://정상호스트`와 `https://정상호스트`를 같은 출처로 오인한다.
 
 **결론**: 배포자가 알고 있는 정확한 값을 `APP_ORIGIN` 환경변수(`scheme://host[:port]`)로 명시하고, 요청의 `Origin`을 그 값과 전체 비교(스킴+호스트+포트)하도록 바꿨다(`lib/security/origin-guard.ts`). `APP_ORIGIN`이 없거나 형식이 잘못되면 Production의 모든 상태 변경 요청을 fail-closed로 거부한다 — "일단 Host로 비교해본다"는 폴백을 두지 않았다. 이 방식의 트레이드오프는 배포마다(Vercel Preview 등) 값이 달라지는 환경에서는 배포 자동화가 그 값을 정확히 주입해야 한다는 점이다 — Preview는 매 배포마다 URL이 바뀌므로 Production과 같은 `APP_ORIGIN`을 공유할 수 없고, 이번 PR은 Preview용 자동 주입 파이프라인을 만들지 않았다(Preview에서 실제 인증까지 켜고 싶다면 별도 안정 도메인을 붙이거나, 그 환경 전용 값을 수동으로 설정해야 한다).
+
+## 9. 알림 claim에 fencing token 추가 (2차 검토 반영)
+
+§7에서 채택한 Outbox/Claim 모델은 두 Worker가 "동시에" 같은 알림을 처리하는 경쟁은 막지만, 다음과 같은 시차가 있는 경쟁은 막지 못했다: Worker A가 claim → A의 어댑터 호출이 오래 걸려 lease 만료 → Worker B가 재획득 → A가 뒤늦게 `completeNotificationClaim()`을 호출 → A가 B의 새 claim 상태나 결과를 덮어씀. lease만으로는 "이 완료 처리가 지금 유효한 claim의 것인지"를 구분할 수 없었다.
+
+**결론**: claim마다(최초 claim과 모든 재획득마다) 무작위 `claimToken`을 새로 발급하고, `completeNotificationClaim()`은 저장된 토큰과 정확히 일치하고 상태가 여전히 `sending`일 때만 적용한다(`applied: true`). 일치하지 않으면(`stale_claim`) 저장된 행을 절대 수정하지 않고 현재 상태를 그대로 반환한다. Postgres 구현에서는 이것이 완료 UPDATE의 `WHERE ... AND claim_token = $token` CAS 조건이 된다(`db/postgres/migrations/0001_init.sql` 참고). 이 fencing은 **저장소 상태의 일관성**만 보장한다는 점을 분명히 해야 한다 -- Worker A가 실제로 외부 알림을 이미 보낸 뒤 lease가 만료됐다면, 그 외부 발송 자체는 막을 수 없다(A는 그저 자신의 그 결과를 저장소에 기록하는 데 실패할 뿐이다). 즉 이 시스템은 **최소 한 번(at-least-once)** 외부 전달을 목표로 하며, **정확히 한 번(exactly-once)**은 저장소만으로 달성할 수 없는 목표로 명시한다 -- 그렇게 하려면 외부 Provider의 자체 멱등키 지원이 필요하다.
+
+## 10. 감사(Audit) 저장소를 lib/watch에서 분리 (2차 검토 반영)
+
+`AuditAction`/`AuditEvent`와 그 저장 로직이 원래 `lib/watch/types.ts`/`lib/watch/store.ts`에 있었다. 이 때문에 두 가지 문제가 있었다: (1) `lib/auth`의 라우트가 자기 자신의 활동(가입/로그인/로그아웃/계정삭제)을 기록하려면 `lib/watch`의 모듈 내부 상태를 참조해야 하는 계층 역전이 있었고, (2) 실제로 `user_signup`/`user_login`/`user_logout`/`user_deleted` 액션이 타입에는 선언돼 있었지만 어떤 auth 라우트도 실제로 기록을 호출하지 않아 인증 관련 활동이 감사 로그에서 통째로 빠져 있었다(2차 검토에서 발견).
+
+**결론**: `lib/audit/{types,store,memory-store}.ts`를 신설해 `AuditStore` 인터페이스와 타입을 독립시켰다. `lib/auth`의 signup/login/logout/account 라우트와 `lib/watch/store.ts`가 모두 같은 `getAuditStore()` 시드를 통해 기록한다. `AUTH_STORE`/`WATCH_STORE`는 계속 독립적으로 동작하며, 감사 기록 자체는 별도의 fail-closed 플래그를 두지 않았다 — 감사 기록은 항상 그 상위 작업(가입, 로그인 등)이 이미 자신의 저장소 게이트를 통과한 뒤에만 호출되므로, 별도로 게이트할 대상이 없다. 계정 삭제는 (1) `user_deleted` 기록 → (2) 이 사용자의 모든 이벤트를 하나의 가명으로 치환 → (3) watch/device/알림/동의 데이터 삭제 → (4) 세션·계정 삭제 순서로 조율한다(`app/api/auth/account/route.ts`) -- 실제 Postgres 구현에서는 이 네 단계가 한 트랜잭션 안에 있어야 한다는 계약을 `lib/audit/types.ts`와 `db/postgres/migrations/0001_init.sql`에 문서화했다.
