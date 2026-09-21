@@ -25,3 +25,15 @@ export async function verifyPassword(password: string, stored: string): Promise<
   if (derived.length !== expected.length) return false;
   return timingSafeEqual(derived, expected);
 }
+
+// 존재하지 않는 계정으로 로그인을 시도해도 항상 진짜 scrypt 연산이 한 번
+// 수행되도록 하기 위한 더미 해시. 로그인 라우트가 "계정 없음"과 "비밀번호
+// 틀림"을 응답 시간 차이로도 구분되지 않게 만드는 용도로만 쓴다 -- 값 자체는
+// 어떤 실제 계정과도 무관하며 최초 호출 시 한 번만 계산해 재사용한다.
+let dummyPasswordHash: Promise<string> | null = null;
+export function getDummyPasswordHash(): Promise<string> {
+  if (!dummyPasswordHash) {
+    dummyPasswordHash = hashPassword(randomBytes(32).toString("hex"));
+  }
+  return dummyPasswordHash;
+}

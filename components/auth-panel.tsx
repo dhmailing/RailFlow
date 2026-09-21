@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { LoaderCircle, LogOut, ShieldCheck, Trash2, UserRound } from "lucide-react";
 import { toast } from "sonner";
 
@@ -22,6 +22,26 @@ export default function AuthPanel({
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  // null = 아직 확인 중. 로그인 폼을 보여줄지, "준비 중" 안내를 보여줄지는
+  // 서버의 운영 저장소 연결 여부(/api/auth/status)로만 판단한다 -- 클라이언트가
+  // 임의로 추정하지 않는다.
+  const [storeEnabled, setStoreEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/status")
+      .then((res) => res.json() as Promise<{ enabled?: boolean }>)
+      .then((data) => {
+        if (!cancelled) setStoreEnabled(Boolean(data.enabled));
+      })
+      .catch(() => {
+        if (!cancelled) setStoreEnabled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const submit = async () => {
     if (!email || password.length < 8) {
@@ -59,12 +79,22 @@ export default function AuthPanel({
   };
 
   const deleteAccount = async () => {
+    if (!deletePassword) {
+      toast.error("비밀번호를 입력해주세요.");
+      return;
+    }
     setSubmitting(true);
     try {
-      const response = await fetch("/api/auth/account", { method: "DELETE" });
-      if (!response.ok) throw new Error("계정을 삭제하지 못했습니다.");
+      const response = await fetch("/api/auth/account", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: deletePassword }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as { error?: { message: string } };
+      if (!response.ok) throw new Error(payload.error?.message ?? "계정을 삭제하지 못했습니다.");
       onAuthChanged(null);
       setConfirmingDelete(false);
+      setDeletePassword("");
       toast("계정과 감시 작업 데이터를 삭제했어요");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "계정을 삭제하지 못했습니다.");
@@ -73,7 +103,7 @@ export default function AuthPanel({
     }
   };
 
-  if (loading) {
+  if (loading || storeEnabled === null) {
     return (
       <div role="status" className="rounded-[26px] border border-white/10 bg-[#111] p-5 text-sm text-white/50">
         <LoaderCircle className="mb-2 size-5 animate-spin text-orange-400" /> 로그인 상태 확인 중
@@ -101,10 +131,28 @@ export default function AuthPanel({
         </div>
         <div className="mt-4 border-t border-white/[0.07] pt-4">
           {confirmingDelete ? (
-            <div className="flex items-center justify-between gap-3">
+            <div className="space-y-3">
               <p className="text-xs leading-5 text-orange-300">계정과 모든 감시 작업·알림 기록·알림 수신 기기가 삭제됩니다. 되돌릴 수 없어요.</p>
-              <div className="flex shrink-0 gap-2">
-                <Button size="sm" variant="ghost" disabled={submitting} onClick={() => setConfirmingDelete(false)} className="text-white/50">취소</Button>
+              <input
+                type="password"
+                placeholder="비밀번호 확인"
+                value={deletePassword}
+                onChange={(e) => setDeletePassword(e.target.value)}
+                className="w-full rounded-xl border border-white/10 bg-black/35 p-3 text-white"
+              />
+              <div className="flex justify-end gap-2">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={submitting}
+                  onClick={() => {
+                    setConfirmingDelete(false);
+                    setDeletePassword("");
+                  }}
+                  className="text-white/50"
+                >
+                  취소
+                </Button>
                 <Button size="sm" disabled={submitting} onClick={deleteAccount} className="bg-red-500/90 text-white hover:bg-red-500">삭제 확정</Button>
               </div>
             </div>
@@ -116,6 +164,25 @@ export default function AuthPanel({
               <a href="/privacy" className="text-[11px] text-white/30 underline">개인정보처리방침</a>
             </div>
           )}
+        </div>
+      </div>
+    );
+  }
+
+  if (!storeEnabled) {
+    return (
+      <div className="rounded-[26px] border border-white/10 bg-[#111] p-5">
+        <p className="text-sm text-white/42">RailFlow 계정</p>
+        <div className="mt-3 flex items-center gap-3">
+          <span className="grid size-12 shrink-0 place-items-center rounded-2xl bg-white/[0.05] text-white/40">
+            <UserRound className="size-6" />
+          </span>
+          <div>
+            <p className="font-extrabold">계정 기능 준비 중</p>
+            <p className="mt-1 text-xs leading-5 text-white/38">
+              운영 계정 저장소가 아직 연결되지 않아 로그인·회원가입을 사용할 수 없습니다. 연결 후 다시 안내할게요.
+            </p>
+          </div>
         </div>
       </div>
     );

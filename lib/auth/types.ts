@@ -11,7 +11,11 @@ export type AuthErrorCode =
   | "INVALID_CREDENTIALS"
   | "UNAUTHENTICATED"
   | "SESSION_EXPIRED"
-  | "WEAK_PASSWORD";
+  | "WEAK_PASSWORD"
+  // 운영 계정 저장소(AUTH_STORE)가 usable 상태가 아닐 때 -- see lib/auth/feature-flags.ts.
+  | "AUTH_STORE_DISABLED"
+  // 계정 삭제 등 민감한 작업에 필요한 비밀번호 재확인이 실패했을 때.
+  | "REAUTH_REQUIRED";
 
 export class AuthError extends Error {
   constructor(
