@@ -139,3 +139,14 @@
 - **[결함][레이아웃] 체크박스가 행 전체 너비로 늘어나는 CSS 결함**: `app/globals.css`의 전역 규칙 `main input { width: 100%; }`가 텍스트/날짜 입력을 위한 규칙이었는데 `type="checkbox"`에도 적용되어, 후보 열차 체크박스가 20px가 아니라 행 폭 전체(수백 px)로 늘어나 있었다(기능적으로는 클릭은 되지만, 옆 텍스트를 폭 0으로 밀어내는 등 레이아웃이 깨져 있었다). checkbox/radio를 이 규칙에서 제외해 수정했다 — 이 시연 페이지뿐 아니라 `<main>` 아래의 다른 체크박스(취소표 감시·자동예약 탭 등)에도 동일하게 적용되던 기존 결함이었다.
 - 공개 시연(`/demo/booking-automation`)에 이 자동 감시가 브라우저 탭 타이머로만 동작한다는 점(탭을 닫거나 화면을 잠그면 멈추며, 서버가 대신 감시하지 않는다는 점)을 명시하는 안내를 추가했다 — 기존 구현에 실제로 독립적인 서버 실행(Worker/큐/cron)이 전혀 없다는 사실을 감추지 않기 위함이며, 이번 단계에서 그런 서버 인프라를 새로 만들지는 않았다.
 - `scripts/verify-automation-demo.cjs`에 위 결함들에 대한 회귀 테스트를 추가하고(인원 미달, 좌석등급/시간대 필터링, 결제기한 만료, 손상된 sessionStorage의 새 스키마 필드 거부 등), `tests/e2e/booking-automation-demo.spec.ts`에 실제 브라우저로 검증하는 테스트 3개를 추가했다. `tests/e2e/mock-browser-provider.contract.spec.ts`에는 요청 레벨 차단을 검증하는 테스트를 추가했다.
+
+### 이어받기 세션 — PR #11 보고 정정 및 1단계 마무리 보완 (2026-09-22, 코드 변경 포함)
+
+PR #11을 병합하지 않은 채로, 검토 과정에서 지적된 결함·보고 오류를 마저 고쳤다. 새 시뮬레이터나 기능 확장은 하지 않았다.
+
+- **[결함] 후보 열차를 2개 이상 선택해야만 감시를 시작할 수 있던 불필요한 제약 제거**: `MIN_SELECTED_CANDIDATES`를 2에서 1로 낮췄다. 원하는 열차 한 편만 골라 감시하는 것도 정상 시나리오이며, 후보 0개는 여전히 시작을 막고, 여러 편을 선택하면 그중 하나가 예약에 성공했을 때 나머지를 자동 중단하는 기존 동작은 그대로 유지된다.
+- **[결함][보안] 외부 요청 차단 범위를 요청 인터셉션 이상으로 확장**: `page.route()`는 그 page 객체 하나만 보호해, 대상 페이지가 팝업(`window.open` 등)을 열면 그 요청은 차단 범위 밖에 있었다. `context.route()`로 전환해 같은 컨텍스트의 새 페이지·팝업에도 동일하게 적용되도록 했다(실제 팝업으로 재현해 차단됨을 새 테스트로 확인). Service Worker가 `page.route()`/`context.route()`를 우회해 자체적으로 요청을 보낼 수 있는 Playwright의 알려진 한계에 대비해, 이 자동화 컨텍스트에서는 `serviceWorkers: "block"`으로 Service Worker 등록 자체를 금지했다(현재 `/demo/booking-simulator`는 SW를 등록하지 않지만, 향후 코드 변경에도 같은 우회 경로가 생기지 않도록 방어 심화). WebSocket은 Playwright가 `route()`로 아예 가로챌 수 없는 별도 한계라, 연결 이벤트를 감지해 허용되지 않은 호스트면 브라우저 프로세스를 강제 종료하는 방식으로 보완했다(사전 차단이 아니라 감지 즉시 차단이며, 이 fixture는 애초에 WebSocket을 쓰지 않아 현재는 도달하지 않는 방어 심화 계층임을 정직하게 기록한다).
+  - 이 작업 중 실제 회귀를 하나 발견·수정했다: WebSocket 판정에 기존 `isAutomationTargetAllowed()`(http/https만 허용)를 그대로 재사용했더니, `next dev`가 모든 페이지에 자동으로 여는 HMR용 같은-오리진 WebSocket(`ws://localhost:.../_next/webpack-hmr`)까지 차단되어 로컬 개발 환경에서 자동화 페이지 탐색 자체가 실패했다. `lib/automation/host-guard.ts`의 호스트 판정을 `ws:`/`wss:`에도 `http:`/`https:`와 동일한 allowlist로 확장해(외부 호스트로의 ws:/wss:는 여전히 차단) 해결했다.
+- **[보고 정정]** 직전 라운드의 보고에서 두 가지 오류가 있었다: (1) PR #11이 아직 병합되지 않았는데도 운영 배포 URL에서 수정사항을 확인하라고 안내했다 — 이번에는 GitHub의 실제 Vercel 배포 코멘트에서 PR #11 최신 HEAD의 Preview 주소를 확인해 안내를 정정했다(운영 URL 안내는 하지 않는다). (2) 오프라인 verify 스크립트를 "7개"라고 썼지만 실제로는 6개였다 — 개수를 정정했다.
+
+`scripts/verify-automation-demo.cjs`와 `scripts/verify-booking-simulator.cjs`, `tests/e2e/booking-automation-demo.spec.ts`, `tests/e2e/mock-browser-provider.contract.spec.ts`에 위 변경에 대한 회귀 테스트를 추가했다.
