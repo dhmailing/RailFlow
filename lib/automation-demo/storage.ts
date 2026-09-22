@@ -16,12 +16,15 @@ export type AutomationDemoStorageLike = {
   removeItem(key: string): void;
 };
 
-const STATUS_VALUES = ["READY", "WATCHING", "SEAT_FOUND", "PURCHASE_CLICKING", "RESERVING", "PAYMENT_PENDING", "COMPLETED", "CANCELLED"] as const;
-const CANDIDATE_STATUS_VALUES = ["waiting", "checking", "sold_out", "seat_found", "stopped"] as const;
+const STATUS_VALUES = ["READY", "WATCHING", "SEAT_FOUND", "PURCHASE_CLICKING", "RESERVING", "PAYMENT_PENDING", "COMPLETED", "PAYMENT_EXPIRED", "CANCELLED"] as const;
+const CANDIDATE_STATUS_VALUES = ["waiting", "checking", "sold_out", "insufficient", "seat_found", "stopped"] as const;
 const ACTIVE_STATUS_VALUES = ["WATCHING", "SEAT_FOUND", "PURCHASE_CLICKING", "RESERVING", "PAYMENT_PENDING"] as const;
-const REQUIRES_FOUND_CANDIDATE_STATUS_VALUES = ["SEAT_FOUND", "PURCHASE_CLICKING", "RESERVING", "PAYMENT_PENDING", "COMPLETED"] as const;
-const REQUIRES_RESERVATION_STATUS_VALUES = ["PAYMENT_PENDING", "COMPLETED"] as const;
-const TERMINAL_STATUS_VALUES = ["COMPLETED", "CANCELLED"] as const;
+const REQUIRES_FOUND_CANDIDATE_STATUS_VALUES = ["SEAT_FOUND", "PURCHASE_CLICKING", "RESERVING", "PAYMENT_PENDING", "COMPLETED", "PAYMENT_EXPIRED"] as const;
+const REQUIRES_RESERVATION_STATUS_VALUES = ["PAYMENT_PENDING", "COMPLETED", "PAYMENT_EXPIRED"] as const;
+// PAYMENT_EXPIRED requires startedAt/endedAt like a terminal status even
+// though it isn't one in state-machine.ts (it can still lead to a fresh
+// RESTART_WATCH journey, exactly like COMPLETED/CANCELLED).
+const REQUIRES_END_TIMESTAMPS_STATUS_VALUES = ["COMPLETED", "CANCELLED", "PAYMENT_EXPIRED"] as const;
 
 const MAX_WATCH_TICK = 10_000;
 
@@ -49,7 +52,12 @@ const isoDateTimeSchema = z
 
 const scenarioSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("always_sold_out") }),
-  z.object({ kind: z.literal("seat_after_n_checks"), checksRequired: z.number().int().min(1).max(20), seatClass: z.enum(["standard", "special"]) }),
+  z.object({
+    kind: z.literal("seat_after_n_checks"),
+    checksRequired: z.number().int().min(1).max(20),
+    seatClass: z.enum(["standard", "special"]),
+    seatCount: z.number().int().min(0).max(20),
+  }),
 ]);
 
 const candidateSchema = z.object({
@@ -70,6 +78,8 @@ const conditionSchema = z.object({
   date: dateOnlySchema,
   timeRangeStart: timeOnlySchema,
   timeRangeEnd: timeOnlySchema,
+  passengers: z.number().int().min(1).max(4),
+  seatClassPreference: z.enum(["standard_only", "standard_preferred", "any"]),
 });
 
 const historyEntrySchema = z.object({
@@ -128,7 +138,7 @@ const automationDemoStateSchema = z
     } else if ((ACTIVE_STATUS_VALUES as readonly string[]).includes(value.status)) {
       if (value.startedAt === null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["startedAt"], message: `status ${value.status} requires startedAt` });
       if (value.endedAt !== null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endedAt"], message: `status ${value.status} must not have endedAt yet` });
-    } else if ((TERMINAL_STATUS_VALUES as readonly string[]).includes(value.status)) {
+    } else if ((REQUIRES_END_TIMESTAMPS_STATUS_VALUES as readonly string[]).includes(value.status)) {
       if (value.startedAt === null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["startedAt"], message: `status ${value.status} requires startedAt` });
       if (value.endedAt === null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endedAt"], message: `status ${value.status} requires endedAt` });
       if (value.startedAt !== null && value.endedAt !== null && new Date(value.endedAt).getTime() < new Date(value.startedAt).getTime()) {

@@ -81,4 +81,85 @@ test.describe("자동 좌석조회·예약 매크로 공개 시연 (/demo/bookin
     await page.getByRole("button", { name: "결제 완료" }).click();
     await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "COMPLETED");
   });
+
+  // 1단계 결함 수정 검증: "입력한 시간대·인원·좌석등급이 실제 후보 선정과
+  // 가상 예약에 반영되는지도 검증한다. 입력 UI만 있고 시나리오가 이를
+  // 무시하면 결함으로 수정해라" -- 인원(passengers) 입력이 실제로
+  // 자동 예약 성공 여부에 반영되는지 실제 브라우저로 확인한다. 이 fixture는
+  // 두 후보 모두 항상 좌석이 1석만 나오므로, 2명을 요청하면 몇 번을
+  // 확인하든 "좌석 발견"으로 넘어가면 안 된다(표시된 좌석 수가 요청 인원보다
+  // 적을 때는 예약 성공으로 처리하지 않는다).
+  test("인원 2명을 요청하면 좌석이 1석만 있는 후보는 예약 성공으로 이어지지 않는다", async ({ page }) => {
+    await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await page.goto("/demo/booking-automation");
+
+    await page.locator('[data-testid="demo-passengers-select"]').selectOption("2");
+    await page.locator('[data-testid="demo-candidate-row"][data-candidate-id="auto-demo-candidate-2"] input[type="checkbox"]').check();
+    await page.locator('[data-testid="demo-candidate-row"][data-candidate-id="auto-demo-candidate-3"] input[type="checkbox"]').check();
+    await page.getByRole("button", { name: "1초" }).click();
+    await page.getByRole("button", { name: "자동 감시 시작" }).click();
+
+    // candidate-2가 자신의 3번째 확인(5번째 전체 tick)에 도달할 때까지 진행.
+    for (let i = 0; i < 5; i += 1) {
+      await page.clock.fastForward(1000);
+    }
+    await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "WATCHING", {
+      timeout: 2000,
+    });
+    await expect(page.locator('[data-testid="demo-candidate-row"][data-candidate-id="auto-demo-candidate-2"]')).toHaveAttribute("data-candidate-status", "insufficient");
+    await expect(page.getByText("좌석 부족(요청 인원 미달)").first()).toBeVisible();
+
+    // 몇 회차를 더 진행해도 결코 SEAT_FOUND/PAYMENT_PENDING으로 넘어가지 않는다.
+    for (let i = 0; i < 10; i += 1) {
+      await page.clock.fastForward(1000);
+    }
+    await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "WATCHING");
+  });
+
+  // "좌석등급이 실제 후보 선정에 반영되는지" -- 일반실만 선호로 바꾸면 특실만
+  // 나오는 후보(candidate-3)는 선택 자체가 불가능해야 한다.
+  test("좌석등급을 일반실만으로 선택하면 특실 후보는 선택할 수 없다", async ({ page }) => {
+    await page.goto("/demo/booking-automation");
+
+    await page.getByRole("button", { name: "일반실만" }).click();
+    const candidate3Row = page.locator('[data-testid="demo-candidate-row"][data-candidate-id="auto-demo-candidate-3"]');
+    await expect(candidate3Row).toHaveAttribute("data-ineligible", "true");
+    await expect(candidate3Row.locator('input[type="checkbox"]')).toBeDisabled();
+    await expect(candidate3Row.getByText("선택 불가")).toBeVisible();
+
+    // 일반실 후보(candidate-2)는 그대로 선택 가능해야 한다.
+    const candidate2Row = page.locator('[data-testid="demo-candidate-row"][data-candidate-id="auto-demo-candidate-2"]');
+    await expect(candidate2Row.locator('input[type="checkbox"]')).toBeEnabled();
+  });
+
+  // §4 결함 수정: "감시 기한과 결제기한은 구분한다. 결제기한이 지난 가상
+  // 예약을 결제 완료로 변경할 수 없게 한다" -- 실제 브라우저 타이머(가상
+  // clock)로 결제기한을 넘긴 뒤 "결제 완료" 버튼이 더 이상 동작하지 않고,
+  // 대신 PAYMENT_EXPIRED로 자동 전이되어 "다시 감시"만 가능함을 확인한다.
+  test("결제기한이 지나면 결제 완료로 전환할 수 없고 자동으로 결제기한 만료 상태가 된다", async ({ page }) => {
+    await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await page.goto("/demo/booking-automation");
+
+    await page.locator('[data-testid="demo-candidate-row"][data-candidate-id="auto-demo-candidate-2"] input[type="checkbox"]').check();
+    await page.locator('[data-testid="demo-candidate-row"][data-candidate-id="auto-demo-candidate-3"] input[type="checkbox"]').check();
+    await page.getByRole("button", { name: "1초" }).click();
+    await page.getByRole("button", { name: "자동 감시 시작" }).click();
+
+    // READY -> ... -> PAYMENT_PENDING까지 8번의 1초 tick.
+    for (let i = 0; i < 8; i += 1) {
+      await page.clock.fastForward(1000);
+    }
+    await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "PAYMENT_PENDING");
+    await expect(page.getByRole("button", { name: "결제 완료" })).toBeVisible();
+
+    // 결제기한(+10분)을 넘긴다.
+    await page.clock.fastForward(11 * 60 * 1000);
+    await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "PAYMENT_EXPIRED");
+    await expect(page.getByRole("button", { name: "결제 완료" })).toHaveCount(0, { timeout: 2000 });
+    await expect(page.getByText("결제기한 만료 · 가상 예약 취소됨")).toBeVisible();
+
+    // "다시 감시"로 새 journey를 시작할 수 있다.
+    await page.getByRole("button", { name: "다시 감시" }).click();
+    await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "WATCHING");
+  });
 });

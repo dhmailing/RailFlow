@@ -13,7 +13,7 @@
 // Preview builds run with NODE_ENV=production).
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import Link from "next/link";
-import { CalendarDays, CircleCheck, CircleDashed, Clock, LoaderCircle, RefreshCcw, RotateCcw, Sparkles, SquareX, TicketCheck } from "lucide-react";
+import { CalendarDays, CircleCheck, CircleDashed, Clock, LoaderCircle, RefreshCcw, RotateCcw, Sparkles, SquareX, TicketCheck, TriangleAlert, Users } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -23,12 +23,15 @@ import {
   automationDemoReducer,
   computeElapsedSeconds,
   createDefaultAutomationDemoState,
+  MAX_PASSENGERS,
+  MIN_PASSENGERS,
   MIN_SELECTED_CANDIDATES,
   type AutomationDemoAction,
 } from "@/lib/automation-demo/reducer";
+import { isCandidateEligible, isCandidateWithinTimeRange } from "@/lib/automation-demo/scenarios";
 import { createAutomationDemoTimerController } from "@/lib/automation-demo/timer";
 import { clearAutomationDemoState, readAutomationDemoState, writeAutomationDemoState } from "@/lib/automation-demo/storage";
-import type { AutomationDemoCandidate, AutomationDemoIntervalSeconds, AutomationDemoStatus } from "@/lib/automation-demo/types";
+import type { AutomationDemoCandidate, AutomationDemoIntervalSeconds, AutomationDemoSeatClassPreference, AutomationDemoStatus } from "@/lib/automation-demo/types";
 
 const STATUS_LABEL: Record<AutomationDemoStatus, string> = {
   READY: "조건 설정",
@@ -38,17 +41,25 @@ const STATUS_LABEL: Record<AutomationDemoStatus, string> = {
   RESERVING: "자동 예약 요청 중",
   PAYMENT_PENDING: "결제 대기",
   COMPLETED: "예약 성공",
+  PAYMENT_EXPIRED: "결제기한 만료",
   CANCELLED: "시연 중단됨",
 };
 
-const CANDIDATE_STATUS_LABEL: Record<"idle" | "waiting" | "checking" | "sold_out" | "seat_found" | "stopped", string> = {
+const CANDIDATE_STATUS_LABEL: Record<"idle" | "waiting" | "checking" | "sold_out" | "insufficient" | "seat_found" | "stopped", string> = {
   idle: "확인 필요",
   waiting: "대기",
   checking: "확인 중",
   sold_out: "매진(재판매 없음)",
+  insufficient: "좌석 부족(요청 인원 미달)",
   seat_found: "좌석 발견",
   stopped: "다른 열차 예약 성공으로 자동 중단",
 };
+
+const SEAT_CLASS_PREFERENCE_OPTIONS: { value: AutomationDemoSeatClassPreference; label: string }[] = [
+  { value: "standard_only", label: "일반실만" },
+  { value: "standard_preferred", label: "일반실 우선" },
+  { value: "any", label: "무관" },
+];
 
 const INTERVAL_OPTIONS: AutomationDemoIntervalSeconds[] = [1, 2, 3, 4, 5];
 const ACTIVE_STATUSES: readonly AutomationDemoStatus[] = ["WATCHING", "SEAT_FOUND", "PURCHASE_CLICKING", "RESERVING", "PAYMENT_PENDING"];
@@ -66,6 +77,12 @@ export default function BookingAutomationDemo() {
   const [hydrated, setHydrated] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const timerRef = useRef(createAutomationDemoTimerController());
+  // §4 결함 수정: "결제기한이 지난 가상 예약을 결제 완료로 변경할 수 없게
+  // 한다" -- 메인 전이 타이머와 별개의 단일 슬롯 타이머로, PAYMENT_PENDING에
+  // 진입한 시점부터 결제기한까지 남은 실제 시간만큼만 기다렸다가
+  // EXPIRE_PAYMENT를 보낸다. 새로고침으로 복원된 직후 이미 기한이 지나
+  // 있었다면 delay 0으로 즉시 만료 처리된다.
+  const paymentExpiryTimerRef = useRef(createAutomationDemoTimerController());
   const completedOnceRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -102,6 +119,17 @@ export default function BookingAutomationDemo() {
     return () => controller.clear();
   }, [state.status, state.intervalSeconds, state.watchTick]);
 
+  useEffect(() => {
+    const controller = paymentExpiryTimerRef.current;
+    if (state.status === "PAYMENT_PENDING" && state.paymentDeadline) {
+      const delayMs = Math.max(0, new Date(state.paymentDeadline).getTime() - Date.now());
+      controller.schedule(() => dispatch({ type: "EXPIRE_PAYMENT" }), delayMs);
+    } else {
+      controller.clear();
+    }
+    return () => controller.clear();
+  }, [state.status, state.paymentDeadline]);
+
   // PAYMENT_PENDING 진입 시 1회 토스트(§7). completedOnceRef로 같은
   // reservationNumber에 대해 중복 실행을 막는다.
   useEffect(() => {
@@ -121,6 +149,7 @@ export default function BookingAutomationDemo() {
 
   const resetDemo = () => {
     timerRef.current.clear();
+    paymentExpiryTimerRef.current.clear();
     clearAutomationDemoState(window.sessionStorage);
     completedOnceRef.current = null;
     dispatch({ type: "HYDRATE", state: createDefaultAutomationDemoState() });
@@ -161,6 +190,16 @@ export default function BookingAutomationDemo() {
           <p aria-live="polite" role="status" className="sr-only">
             현재 상태: {STATUS_LABEL[state.status]}
           </p>
+
+          <div className="flex items-start gap-2 rounded-2xl border border-white/10 bg-black/25 p-3 text-[11px] leading-5 text-white/45">
+            <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-[#ff9b3f]" />
+            <div>
+              <p className="font-bold text-white/60">이 자동 감시는 이 브라우저 탭의 타이머로만 동작합니다.</p>
+              <p className="mt-0.5">탭을 열어둔 채 화면을 보고 있으면 계속 진행됩니다. 탭을 백그라운드로 전환해도 최신 브라우저는 대부분 타이머를 유지하지만 지연될 수 있습니다.</p>
+              <p className="mt-0.5">화면을 잠그거나 브라우저·탭을 완전히 종료하면 타이머가 멈춥니다 -- 서버가 대신 감시를 이어가지 않습니다. 다시 열면 저장된 상태(sessionStorage)만 복원되고, 종료된 동안 진행되지 않은 시간은 채워지지 않습니다.</p>
+              <p className="mt-0.5 font-bold text-white/55">서버 쪽 자동 감시(Worker)가 필요한 경우는 앱을 완전히 닫거나 기기 화면을 꺼도 감시가 이어져야 할 때이며, 이 시연을 포함해 현재 RailFlow에는 그런 독립 서버 실행 장치가 없습니다.</p>
+            </div>
+          </div>
 
           <ConditionCard state={state} dispatch={dispatch} disabled={!isReady} />
           <CandidateListCard state={state} dispatch={dispatch} disabled={!isReady} />
@@ -255,6 +294,45 @@ function ConditionCard({
             />
           </label>
         </div>
+
+        <label className="block rounded-2xl border border-white/10 bg-black/35 p-3">
+          <span className="mb-1 flex items-center gap-1.5 text-xs text-white/48">
+            <Users className="size-3.5" /> 인원
+          </span>
+          <select
+            data-testid="demo-passengers-select"
+            value={state.condition.passengers}
+            disabled={disabled}
+            onChange={(event) => dispatch({ type: "SET_PASSENGERS", passengers: Number(event.target.value) })}
+            className="min-h-11 w-full min-w-0 bg-transparent text-base font-bold outline-none [color-scheme:dark] disabled:opacity-50"
+          >
+            {Array.from({ length: MAX_PASSENGERS - MIN_PASSENGERS + 1 }, (_, index) => MIN_PASSENGERS + index).map((count) => (
+              <option key={count} value={count} className="bg-[#111] text-white">
+                {count}명
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div>
+          <p className="mb-1.5 text-xs text-white/48">좌석등급 선호</p>
+          <div className="flex flex-wrap gap-2" role="group" aria-label="좌석등급 선호 선택">
+            {SEAT_CLASS_PREFERENCE_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                disabled={disabled}
+                aria-pressed={state.condition.seatClassPreference === option.value}
+                onClick={() => dispatch({ type: "SET_SEAT_CLASS_PREFERENCE", preference: option.value })}
+                className={`min-h-11 rounded-xl border px-3 text-sm font-extrabold transition disabled:opacity-40 ${
+                  state.condition.seatClassPreference === option.value ? "border-[#ff8a1f] bg-[#ff8a1f] text-black" : "border-white/12 bg-black/30 text-white/60 hover:border-white/25"
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </CardContent>
     </Card>
   );
@@ -277,16 +355,22 @@ function CandidateListCard({
           <span className="text-xs text-white/35">{MIN_SELECTED_CANDIDATES}개 이상 선택</span>
         </div>
         <div className="space-y-2">
-          {state.candidates.map((candidate) => (
-            <CandidateRow
-              key={candidate.id}
-              candidate={candidate}
-              jobStatus={state.status}
-              selected={state.selectedCandidateIds.includes(candidate.id)}
-              disabled={disabled}
-              onToggle={() => dispatch({ type: "TOGGLE_CANDIDATE", candidateId: candidate.id })}
-            />
-          ))}
+          {state.candidates.map((candidate) => {
+            const eligible = isCandidateEligible(candidate, state.condition);
+            const withinTimeRange = isCandidateWithinTimeRange(candidate, state.condition);
+            const ineligibleReason = !withinTimeRange ? "희망 시간대 밖" : !eligible ? "희망 좌석등급 밖" : null;
+            return (
+              <CandidateRow
+                key={candidate.id}
+                candidate={candidate}
+                jobStatus={state.status}
+                selected={state.selectedCandidateIds.includes(candidate.id)}
+                disabled={disabled || !eligible}
+                ineligibleReason={disabled ? null : ineligibleReason}
+                onToggle={() => dispatch({ type: "TOGGLE_CANDIDATE", candidateId: candidate.id })}
+              />
+            );
+          })}
         </div>
         <p className="text-[11px] leading-5 text-white/32">열차번호·시각·운임은 시연용 데이터이며 실제 운행정보가 아닙니다.</p>
       </CardContent>
@@ -299,12 +383,14 @@ function CandidateRow({
   jobStatus,
   selected,
   disabled,
+  ineligibleReason,
   onToggle,
 }: {
   candidate: AutomationDemoCandidate;
   jobStatus: AutomationDemoStatus;
   selected: boolean;
   disabled: boolean;
+  ineligibleReason: string | null;
   onToggle: () => void;
 }) {
   const statusKey = jobStatus === "READY" ? "idle" : candidate.status;
@@ -322,7 +408,8 @@ function CandidateRow({
       data-candidate-id={candidate.id}
       data-candidate-status={statusKey}
       data-check-count={candidate.checkCount}
-      className={`flex min-h-[44px] cursor-pointer items-center gap-3 rounded-2xl border p-3 transition ${toneClass} ${disabled ? "cursor-not-allowed" : ""}`}
+      data-ineligible={ineligibleReason ? "true" : "false"}
+      className={`flex min-h-[44px] cursor-pointer items-center gap-3 rounded-2xl border p-3 transition ${toneClass} ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
     >
       <input
         type="checkbox"
@@ -340,6 +427,7 @@ function CandidateRow({
         <p className="mt-1 text-xs text-white/45">
           {candidate.departAt} 출발 → {candidate.arriveAt} 도착 · {candidate.fareLabel} · 확인 {candidate.checkCount}회차
         </p>
+        {ineligibleReason && <p className="mt-1 text-[11px] font-bold text-[#ff9b3f]">선택 불가 · {ineligibleReason}</p>}
       </div>
       <span
         className={`shrink-0 max-w-[38%] rounded-full px-2.5 py-1 text-right text-[11px] font-bold leading-4 ${
@@ -417,6 +505,8 @@ function ProgressCard({
                 <CircleCheck className="size-3.5 text-emerald-300" />
               ) : state.status === "CANCELLED" ? (
                 <SquareX className="size-3.5 text-white/40" />
+              ) : state.status === "PAYMENT_EXPIRED" ? (
+                <TriangleAlert className="size-3.5 text-[#ff9b3f]" />
               ) : (
                 <LoaderCircle className="size-3.5 animate-spin text-[#ff9b3f]" />
               )}
@@ -463,7 +553,7 @@ function ProgressCard({
         </CardContent>
       </Card>
 
-      {(state.status === "PAYMENT_PENDING" || state.status === "COMPLETED") && foundCandidate && (
+      {(state.status === "PAYMENT_PENDING" || state.status === "COMPLETED" || state.status === "PAYMENT_EXPIRED") && foundCandidate && (
         <ReservationResultSection state={state} foundCandidate={foundCandidate} dispatch={dispatch} />
       )}
 
@@ -491,23 +581,39 @@ function ReservationResultSection({
 
   return (
     <div className="space-y-4">
-      <Card data-testid="demo-reservation-result" data-reservation-number={state.reservationNumber} data-payment-deadline={state.paymentDeadline} className="overflow-hidden rounded-[28px] border-emerald-400/30 bg-emerald-400/[0.06] py-0 text-white">
+      <Card
+        data-testid="demo-reservation-result"
+        data-reservation-number={state.reservationNumber}
+        data-payment-deadline={state.paymentDeadline}
+        className={`overflow-hidden rounded-[28px] py-0 text-white ${state.status === "PAYMENT_EXPIRED" ? "border-[#ff8a1f]/30 bg-[#ff8a1f]/[0.06]" : "border-emerald-400/30 bg-emerald-400/[0.06]"}`}
+      >
         <CardContent className="space-y-2 p-4 sm:p-5">
-          <div className="flex items-center gap-2 text-sm font-extrabold text-emerald-300">
-            <TicketCheck className="size-4" /> 예약 성공
-          </div>
+          {state.status === "PAYMENT_EXPIRED" ? (
+            <div className="flex items-center gap-2 text-sm font-extrabold text-[#ff9b3f]">
+              <TriangleAlert className="size-4" /> 결제기한 만료 · 가상 예약 취소됨
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 text-sm font-extrabold text-emerald-300">
+              <TicketCheck className="size-4" /> 예약 성공
+            </div>
+          )}
           <p className="text-lg font-extrabold">{foundCandidate.trainNumber}</p>
           <p className="text-sm text-white/70">
             {state.condition.departure} {foundCandidate.departAt} → {state.condition.arrival} {foundCandidate.arriveAt}
           </p>
           <p className="text-sm text-white/70">{seatLabel}</p>
-          <p className="text-sm font-bold text-emerald-300">가상 예약번호: {state.reservationNumber}</p>
+          <p className={`text-sm font-bold ${state.status === "PAYMENT_EXPIRED" ? "text-white/40 line-through" : "text-emerald-300"}`}>가상 예약번호: {state.reservationNumber}</p>
           {state.paymentDeadline && (
             <p className="text-sm text-white/60">
               결제기한: {new Date(state.paymentDeadline).toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul", hour12: false })}
+              {state.status === "PAYMENT_EXPIRED" && " (경과)"}
             </p>
           )}
-          <p className="text-[11px] leading-5 text-white/40">가상 예약입니다. 실제 결제나 좌석 확보는 이뤄지지 않았습니다.</p>
+          {state.status === "PAYMENT_EXPIRED" ? (
+            <p className="text-[11px] leading-5 text-white/40">결제기한이 지나 이 가상 예약은 결제 완료로 처리할 수 없습니다. &ldquo;다시 감시&rdquo;로 새로 시작하세요.</p>
+          ) : (
+            <p className="text-[11px] leading-5 text-white/40">가상 예약입니다. 실제 결제나 좌석 확보는 이뤄지지 않았습니다.</p>
+          )}
         </CardContent>
       </Card>
 
@@ -527,7 +633,7 @@ function ReservationResultSection({
         </Button>
       )}
 
-      {state.status === "COMPLETED" && (
+      {(state.status === "COMPLETED" || state.status === "PAYMENT_EXPIRED") && (
         <Button type="button" variant="outline" onClick={() => dispatch({ type: "RESTART_WATCH" })} className="h-11 w-full rounded-xl border-white/15 text-white/60 hover:text-white">
           <RefreshCcw className="size-4" /> 다시 감시
         </Button>
