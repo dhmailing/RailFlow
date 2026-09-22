@@ -18,8 +18,8 @@ export function isSeatAutomationJobsEnabled(): boolean {
 }
 
 // (§3-E 호스트 안전장치) real Production is blocked unconditionally,
-// regardless of any env var. This is deliberately keyed on VERCEL_ENV, not
-// NODE_ENV: Vercel Preview deployments build in Next.js "production" mode
+// regardless of any env var. VERCEL_ENV is preferred over NODE_ENV when
+// present: Vercel Preview deployments build in Next.js "production" mode
 // (NODE_ENV==="production") but are still meant to be demoable per this
 // PR's own spec ("승인된 Vercel Preview의 /demo/booking-simulator" is listed
 // as an *allowed* automation target) -- see docs/V0.7-AUTOMATION-BOUNDARY.md.
@@ -27,8 +27,25 @@ export function isSeatAutomationJobsEnabled(): boolean {
 // "development"), never by this app's own config, so a Preview deployment
 // cannot be mistaken for real Production just because someone sets an env
 // var on it.
+//
+// FIX (1단계 검증): the original version of this function returned
+// `readEnv("VERCEL_ENV") === "production"` unconditionally -- when
+// VERCEL_ENV is simply *absent* (any non-Vercel deployment: self-hosted,
+// Docker, another PaaS, or `next build && next start` run directly), that
+// expression evaluates to `"" === "production"` = false, meaning automation
+// would be treated as usable on a real production deployment that just
+// doesn't happen to run on Vercel. That is a fail-OPEN bug, not a
+// fail-closed one. VERCEL_ENV is only a reliable "this is Preview, not
+// Production" signal when the platform actually sets it; its mere absence
+// must never be read as "therefore not Production" -- so when it is unset,
+// this now falls back to NODE_ENV (the one signal every Node.js production
+// build/run does set), fail-closed.
 export function isRealProductionEnvironment(): boolean {
-  return readEnv("VERCEL_ENV") === "production";
+  const vercelEnv = readEnv("VERCEL_ENV");
+  if (vercelEnv) {
+    return vercelEnv === "production";
+  }
+  return process.env.NODE_ENV === "production";
 }
 
 export function isAutomationProviderUsable(): boolean {

@@ -79,6 +79,7 @@ async function main() {
   const worker = load('lib/automation/worker.ts');
   const mockSiteStore = load('lib/automation/mock-booking-site/store.ts');
   const mockSiteSeed = load('lib/automation/mock-booking-site/seed.ts');
+  const featureFlags = load('lib/automation/feature-flags.ts');
   const { AutomationError } = load('lib/automation/types.ts');
 
   const listingsRoute = load('app/api/automation/mock-site/listings/route.ts');
@@ -435,6 +436,26 @@ async function main() {
   });
   resetAll();
   mockSiteSeed.ensureMockBookingSiteSeeded();
+
+  // -- 17b. VERCEL_ENV가 없는 배포(자체 호스팅 등)에서도 fail-closed(1단계
+  // 검증 결함 수정) -- VERCEL_ENV가 전혀 설정되지 않은(Vercel이 아닌) 실제
+  // production 배포에서 NODE_ENV=production이라면 반드시 차단되어야 한다.
+  // 과거 버전은 VERCEL_ENV 부재를 "Production이 아님"으로 잘못 해석해
+  // fail-open이었다. ------------------------------------------------------
+  await withEnv({ VERCEL_ENV: '', NODE_ENV: 'production' }, async () => {
+    assert.equal(featureFlags.isRealProductionEnvironment(), true, 'VERCEL_ENV 없이 NODE_ENV=production이면 실제 운영으로 간주해 차단해야 한다');
+    assert.equal(featureFlags.isAutomationProviderUsable(), false);
+  });
+  // 대조군: 로컬 개발(NODE_ENV=development, VERCEL_ENV 없음)은 여전히
+  // 차단되지 않아야 한다 -- 이 수정이 일반 개발 환경까지 막으면 안 된다.
+  await withEnv({ VERCEL_ENV: '', NODE_ENV: 'development' }, async () => {
+    assert.equal(featureFlags.isRealProductionEnvironment(), false, '로컬 개발 환경은 여전히 차단되지 않아야 한다');
+  });
+  // 대조군: Vercel Preview(VERCEL_ENV=preview)는 NODE_ENV가 production이어도
+  // 여전히 차단되지 않아야 한다(기존 의도 유지).
+  await withEnv({ VERCEL_ENV: 'preview', NODE_ENV: 'production' }, async () => {
+    assert.equal(featureFlags.isRealProductionEnvironment(), false, 'Vercel Preview는 NODE_ENV=production이어도 차단되면 안 된다');
+  });
 
   // -- 19. mock-direct Provider: 브라우저 없이 동일 시나리오를 완주하고,
   // 실행 불가능한 런타임에서도 mock-browser는 RUNTIME_NOT_SUPPORTED로
