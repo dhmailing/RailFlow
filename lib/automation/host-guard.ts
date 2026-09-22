@@ -40,40 +40,34 @@ function denyNotAllowed(hostname: string): never {
   throw new AutomationError("AUTOMATION_TARGET_NOT_ALLOWED", `허용되지 않은 자동화 대상 호스트입니다: ${hostname}`);
 }
 
-// Validates one candidate automation target. Called (a) before Playwright's
-// very first navigation, using a URL this module itself constructs (never a
-// user-supplied one -- see mock-browser-provider.ts, which takes no `url`
-// parameter from any caller), and (b) again against `page.url()` after that
-// navigation settles, so a redirect to a disallowed host is caught even
-// though goto() already followed it (§4: "리디렉션 후 호스트 재검증").
-// Throws AUTOMATION_TARGET_NOT_ALLOWED and never sends any request when the
-// target is not allowed -- callers must check this before any network
-// activity, not after.
-export function assertAutomationTargetAllowed(rawUrl: string): URL {
+// Non-throwing core, shared by the assert* wrappers below and by
+// mock-browser-provider.ts's request-level interceptor (which needs a
+// boolean per request, not an exception per call -- see isAutomationTargetAllowed).
+function evaluateAutomationTarget(rawUrl: string): { allowed: true; hostname: string } | { allowed: false; hostname: string } {
   let url: URL;
   try {
     url = new URL(rawUrl);
   } catch {
-    denyNotAllowed(rawUrl);
+    return { allowed: false, hostname: rawUrl };
   }
 
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    denyNotAllowed(url.hostname || rawUrl);
+    return { allowed: false, hostname: url.hostname || rawUrl };
   }
 
   const hostname = url.hostname.toLowerCase();
 
   if (isBlockedByDenylist(hostname)) {
-    denyNotAllowed(hostname);
+    return { allowed: false, hostname };
   }
 
   if (isLoopbackHostname(hostname)) {
-    return url;
+    return { allowed: true, hostname };
   }
 
   const selfHost = currentDeploymentHostname();
   if (url.protocol === "https:" && selfHost && hostname === selfHost) {
-    return url;
+    return { allowed: true, hostname };
   }
 
   // Everything else -- a literal IP address (public or private), a
@@ -86,7 +80,40 @@ export function assertAutomationTargetAllowed(rawUrl: string): URL {
   // dotted-decimal before this function ever sees `hostname`, so a
   // disguised loopback address is normalized to the exact string
   // "127.0.0.1" and still only matches the intended loopback case).
-  denyNotAllowed(hostname);
+  return { allowed: false, hostname };
+}
+
+// Non-throwing predicate for request-level interception (mock-browser-
+// provider.ts's page.route() handler) -- every single outgoing request
+// (initial navigation, redirects, subresources) is checked against this
+// *before* it leaves the browser, not only the final page.url() after the
+// fact. Checking only the post-navigation URL would miss a request that was
+// already sent to a disallowed host as part of a redirect chain -- a
+// same-origin page a real automation target might one day serve could still
+// redirect off-host, and by the time goto() resolves that request has
+// already gone out. This function is what lets the interceptor abort such a
+// request before it is ever sent.
+export function isAutomationTargetAllowed(rawUrl: string): boolean {
+  return evaluateAutomationTarget(rawUrl).allowed;
+}
+
+// Validates one candidate automation target. Called (a) before Playwright's
+// very first navigation, using a URL this module itself constructs (never a
+// user-supplied one -- see mock-browser-provider.ts, which takes no `url`
+// parameter from any caller), and (b) again against `page.url()` after that
+// navigation settles, so a redirect to a disallowed host is caught even
+// though goto() already followed it (§4: "리디렉션 후 호스트 재검증"). Both
+// of these are on top of, not instead of, the request-level interceptor
+// above -- that one blocks the request before it is sent; these two catch
+// the case where somehow it already was (defense-in-depth, not the sole
+// guard). Throws AUTOMATION_TARGET_NOT_ALLOWED when the target is not
+// allowed.
+export function assertAutomationTargetAllowed(rawUrl: string): URL {
+  const result = evaluateAutomationTarget(rawUrl);
+  if (!result.allowed) {
+    denyNotAllowed(result.hostname);
+  }
+  return new URL(rawUrl);
 }
 
 // Re-validates the browser's *actual* current address after a navigation

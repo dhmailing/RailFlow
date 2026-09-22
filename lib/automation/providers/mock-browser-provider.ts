@@ -2,7 +2,7 @@ import "server-only";
 
 import { chromium, type Browser, type Page } from "playwright";
 
-import { assertPostNavigationTargetAllowed, buildAutomationTargetUrl } from "@/lib/automation/host-guard";
+import { assertPostNavigationTargetAllowed, buildAutomationTargetUrl, isAutomationTargetAllowed } from "@/lib/automation/host-guard";
 import { AutomationError, type SeatAutomationProvider } from "@/lib/automation/types";
 
 // The only Provider in this PR that actually drives a browser (§4). It is
@@ -34,12 +34,28 @@ async function withAutomationPage<T>(pathAndQuery: string, run: (page: Page) => 
   try {
     browser = await chromium.launch({ executablePath: CHROMIUM_EXECUTABLE_PATH, headless: true });
     const page = await browser.newPage();
+
+    // Request-level interception -- registered *before* any navigation, so
+    // every request this page ever makes (the initial navigation itself,
+    // any redirect the response triggers, any subresource) is checked
+    // against the allowlist and aborted before it leaves the browser if it
+    // fails. Checking only the final page.url() after goto() resolves would
+    // be too late for a request that was already sent as part of a redirect
+    // chain -- this is the "전송 전에 차단" guarantee, not just a
+    // post-hoc URL check.
+    await page.route("**/*", (route) => {
+      const requestUrl = route.request().url();
+      if (!isAutomationTargetAllowed(requestUrl)) {
+        return route.abort();
+      }
+      return route.continue();
+    });
+
     const response = await page.goto(targetUrl, { waitUntil: "networkidle", timeout: 20_000 });
 
-    // (§4 "리디렉션 후 호스트 재검증") goto() already followed any redirect
-    // by the time it resolves -- re-validate the browser's *actual* final
-    // address before doing anything else, in case a redirect landed
-    // somewhere the allowlist does not cover.
+    // (§4 "리디렉션 후 호스트 재검증") Defense-in-depth on top of the
+    // interceptor above: re-validate the browser's *actual* final address
+    // before doing anything else.
     assertPostNavigationTargetAllowed(page.url());
 
     if (response && !response.ok()) {

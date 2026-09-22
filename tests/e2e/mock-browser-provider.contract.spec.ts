@@ -36,11 +36,12 @@ const { load } = require("./load-ts.cjs");
 const hostGuard = load("lib/automation/host-guard.ts") as {
   assertAutomationTargetAllowed: (rawUrl: string) => URL;
   assertPostNavigationTargetAllowed: (currentUrl: string) => URL;
+  isAutomationTargetAllowed: (rawUrl: string) => boolean;
 };
 const mockBrowserProviderModule = load("lib/automation/providers/mock-browser-provider.ts") as {
   mockBrowserSeatAutomationProvider: SeatAutomationProvider;
 };
-const { assertAutomationTargetAllowed, assertPostNavigationTargetAllowed } = hostGuard;
+const { assertAutomationTargetAllowed, assertPostNavigationTargetAllowed, isAutomationTargetAllowed } = hostGuard;
 const { mockBrowserSeatAutomationProvider } = mockBrowserProviderModule;
 
 function fakeCandidate(id: string): AutomationCandidate {
@@ -148,5 +149,56 @@ test.describe("mock-browser Provider 계약 테스트 (실제 Playwright 브라�
     expect(() => assertPostNavigationTargetAllowed("https://evil.example.com/demo/booking-simulator")).toThrow(/허용되지 않은 자동화 대상 호스트/);
     // 허용되는 주소는 통과해야 한다.
     expect(() => assertAutomationTargetAllowed("http://localhost:3000/demo/booking-simulator")).not.toThrow();
+  });
+
+  // §6 후속: "페이지를 연 뒤 URL만 검사하는 방식으로 외부 요청 차단이
+  // 충분하다고 판단하지 마라" -- mock-browser-provider.ts의
+  // withAutomationPage()가 실제로 등록하는 것과 동일한 page.route()
+  // 패턴(isAutomationTargetAllowed로 매 요청을 판정해 허용되지 않으면
+  // route.abort())을 이 테스트에서도 직접 재현해, 허용되지 않은 호스트로의
+  // "탐색 요청 자체"가 브라우저를 떠나기 전에 중단되는지 확인한다(탐색이
+  // 끝난 뒤 최종 URL만 사후 검사하는 것과는 다른 보장이다).
+  test("요청 레벨 차단 -- 허용되지 않은 호스트로의 요청은 전송되기 전에 중단된다", async ({ browser }) => {
+    const page = await browser.newPage();
+    try {
+      let sawDisallowedRequest = false;
+      await page.route("**/*", (route) => {
+        const requestUrl = route.request().url();
+        if (!isAutomationTargetAllowed(requestUrl)) {
+          sawDisallowedRequest = true;
+          return route.abort();
+        }
+        return route.continue();
+      });
+
+      let navigationError: unknown = null;
+      try {
+        await page.goto("https://www.korail.com/", { timeout: 8_000 });
+      } catch (error) {
+        navigationError = error;
+      }
+
+      expect(navigationError, "허용되지 않은 호스트로의 탐색은 route.abort()로 실패해야 한다(성공하면 안 됨)").not.toBeNull();
+      expect(sawDisallowedRequest).toBe(true);
+    } finally {
+      await page.close();
+    }
+
+    // 대조군: 허용되는 주소(localhost)는 같은 인터셉터 패턴 아래에서도 정상
+    // 통과해야 한다 -- 인터셉터 자체가 모든 요청을 막는 게 아님을 확인한다.
+    // 실패한 탐색이 크롬 내부 오류 페이지로 전환되는 것과 경합하지 않도록
+    // 별도의 새 page를 쓴다(withAutomationPage()가 호출마다 새 page를 쓰는
+    // 것과 동일한 방식).
+    const controlPage = await browser.newPage();
+    try {
+      await controlPage.route("**/*", (route) => {
+        const requestUrl = route.request().url();
+        return isAutomationTargetAllowed(requestUrl) ? route.continue() : route.abort();
+      });
+      await controlPage.goto("http://localhost:3000/demo/booking-simulator", { timeout: 15_000 });
+      expect(controlPage.url()).toContain("localhost:3000");
+    } finally {
+      await controlPage.close();
+    }
   });
 });
