@@ -155,13 +155,18 @@ async function main() {
   assert.equal(isTerminalStatus('WATCHING'), false);
   assert.equal(isTerminalStatus('PAYMENT_EXPIRED'), false, 'PAYMENT_EXPIRED는 종료 상태가 아니다 -- 다시 감시(RESTART_WATCH)로 새 journey를 시작할 수 있어야 한다');
 
-  // -- 2. 후보 2개 미만이면 감시 시작 불가(§4) -------------------------------
+  // -- 2. 후보 0개면 감시 시작 불가, 1개만 선택해도 감시 시작 가능(1단계
+  //      결함 수정: 원하는 열차 한 편만 감시하는 것도 정상 시나리오다) -----
   {
+    assert.equal(MIN_SELECTED_CANDIDATES, 1);
+
     const base = createDefaultAutomationDemoState();
+    const noneSelected = automationDemoReducer(base, { type: 'START_WATCHING' });
+    assert.equal(noneSelected.status, 'READY', '후보를 하나도 선택하지 않으면 감시가 시작되면 안 된다');
+
     const oneSelected = automationDemoReducer(base, { type: 'TOGGLE_CANDIDATE', candidateId: 'auto-demo-candidate-2' });
-    const stillReady = automationDemoReducer(oneSelected, { type: 'START_WATCHING' });
-    assert.equal(stillReady.status, 'READY', '후보 1개만 선택한 상태에서는 감시가 시작되면 안 된다');
-    assert.equal(MIN_SELECTED_CANDIDATES, 2);
+    const watching = automationDemoReducer(oneSelected, { type: 'START_WATCHING' });
+    assert.equal(watching.status, 'WATCHING', '후보 1개만 선택해도 감시가 시작되어야 한다');
   }
 
   // -- 3. candidate-1(항상 매진) 반복 조회 -----------------------------------
@@ -221,6 +226,15 @@ async function main() {
     assert.equal(foundCandidateId, 'auto-demo-candidate-3');
     const candidate3 = candidates.find((c) => c.id === 'auto-demo-candidate-3');
     assert.equal(candidate3.checkCount, 5);
+  }
+  {
+    // 1단계 결함 수정 회귀 테스트: reducer의 실제 TICK 경로로(단독 함수
+    // 호출이 아니라) 후보를 단 1개만 선택해도 WATCHING -> SEAT_FOUND까지
+    // 정상 진행되어야 한다.
+    const { state, ticks } = runUntilSeatFound(['auto-demo-candidate-3']);
+    assert.equal(state.status, 'SEAT_FOUND', '후보 1개만 선택해도 좌석 발견까지 진행되어야 한다');
+    assert.equal(state.foundCandidateId, 'auto-demo-candidate-3');
+    assert.equal(ticks, 5);
   }
 
   // -- 6/7/8/9. 좌석발견 -> 구매클릭 -> 예약 -> 가상 예약번호·결제기한 -------

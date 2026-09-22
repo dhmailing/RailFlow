@@ -2,7 +2,9 @@ import { expect, test } from "@playwright/test";
 
 // Real-browser E2E for the public, login-free /demo/booking-automation page
 // (§6 of the v0.7 follow-up request). Drives: condition input -> candidate
-// selection (2+) -> interval selection -> "자동 감시 시작" -> automatic
+// selection (2, to exercise round-robin + auto-stop of the loser -- a
+// single candidate is also valid and covered by a dedicated test below) ->
+// interval selection -> "자동 감시 시작" -> automatic
 // seat-search ticks -> seat found -> automatic purchase-click -> automatic
 // reserve -> payment-pending with a virtual reservation number -> the other
 // candidate showing "다른 열차 예약 성공으로 자동 중단" -> page reload
@@ -161,5 +163,43 @@ test.describe("자동 좌석조회·예약 매크로 공개 시연 (/demo/bookin
     // "다시 감시"로 새 journey를 시작할 수 있다.
     await page.getByRole("button", { name: "다시 감시" }).click();
     await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "WATCHING");
+  });
+
+  // 1단계 결함 수정 검증: "후보 2개 미만이면 시작 불가"는 불필요한 제약이었다
+  // -- 원하는 열차 한 편만 선택해도 감시를 시작하고 좌석 발견부터 가상 예약
+  // 성공까지 정상적으로 진행되어야 한다.
+  test("후보를 한 편만 선택해도 감시를 시작해 예약 성공까지 진행된다", async ({ page }) => {
+    await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await page.goto("/demo/booking-automation");
+
+    // 후보를 하나도 선택하지 않으면 시작 버튼이 비활성 상태여야 한다.
+    await expect(page.getByRole("button", { name: "자동 감시 시작" })).toBeDisabled();
+
+    // candidate-3 한 편만 선택(자신의 5번째 확인에서 좌석 발견).
+    await page.locator('[data-testid="demo-candidate-row"][data-candidate-id="auto-demo-candidate-3"] input[type="checkbox"]').check();
+    await page.getByRole("button", { name: "1초" }).click();
+
+    await expect(page.getByRole("button", { name: "자동 감시 시작" })).toBeEnabled();
+    await page.getByRole("button", { name: "자동 감시 시작" }).click();
+    await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "WATCHING");
+
+    for (let i = 0; i < 4; i += 1) {
+      await page.clock.fastForward(1000);
+    }
+    await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "WATCHING");
+    await expect(page.locator('[data-testid="demo-candidate-row"][data-candidate-id="auto-demo-candidate-3"]')).toHaveAttribute("data-check-count", "4");
+
+    await page.clock.fastForward(1000);
+    await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "SEAT_FOUND");
+    await expect(page.locator('[data-testid="demo-candidate-row"][data-candidate-id="auto-demo-candidate-3"]')).toHaveAttribute("data-candidate-status", "seat_found");
+
+    // 구매클릭 -> 예약 -> 결제 대기까지 추가 클릭 없이 자동 진행.
+    await page.clock.fastForward(1000);
+    await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "PURCHASE_CLICKING");
+    await page.clock.fastForward(1000);
+    await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "RESERVING");
+    await page.clock.fastForward(1000);
+    await expect(page.locator('[data-testid="demo-status"]')).toHaveAttribute("data-status", "PAYMENT_PENDING");
+    await expect(page.locator('[data-testid="demo-reservation-result"]')).toBeVisible();
   });
 });

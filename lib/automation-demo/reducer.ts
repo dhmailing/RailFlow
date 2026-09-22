@@ -35,8 +35,11 @@ export type AutomationDemoAction =
   | { type: "RESTART_WATCH" };
 
 export const DEFAULT_AUTOMATION_DEMO_INTERVAL_SECONDS: AutomationDemoIntervalSeconds = 1;
-// §4 "후보 2개 이상 선택".
-export const MIN_SELECTED_CANDIDATES = 2;
+// 1단계 결함 수정: 후보 0개는 감시할 대상이 없으므로 시작을 막지만,
+// 원하는 열차 한 편만 골라 감시하는 것도 정상 시나리오이므로 2개 이상을
+// 강제하지 않는다. 후보가 여러 개면 그중 하나가 예약에 성공했을 때
+// 나머지를 자동 중단하는 기존 동작(resolveCheckTick)은 그대로 유지된다.
+export const MIN_SELECTED_CANDIDATES = 1;
 export const MIN_PASSENGERS = 1;
 export const MAX_PASSENGERS = 4;
 

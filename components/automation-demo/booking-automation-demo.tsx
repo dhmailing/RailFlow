@@ -216,7 +216,7 @@ export default function BookingAutomationDemo() {
             </Button>
           )}
           {isReady && state.selectedCandidateIds.length < MIN_SELECTED_CANDIDATES && (
-            <p className="-mt-2 text-sm text-white/45">감시를 시작하려면 후보 열차를 {MIN_SELECTED_CANDIDATES}개 이상 선택해주세요.</p>
+            <p className="-mt-2 text-sm text-white/45">감시를 시작하려면 후보 열차를 1개 이상 선택해주세요.</p>
           )}
 
           {!isReady && (
@@ -352,7 +352,7 @@ function CandidateListCard({
       <CardContent className="space-y-3 p-4 sm:p-5">
         <div className="flex items-center justify-between">
           <p className="text-sm font-bold text-white/70">후보 열차 (시연 fixture)</p>
-          <span className="text-xs text-white/35">{MIN_SELECTED_CANDIDATES}개 이상 선택</span>
+          <span className="text-xs text-white/35">1개 이상 선택</span>
         </div>
         <div className="space-y-2">
           {state.candidates.map((candidate) => {
