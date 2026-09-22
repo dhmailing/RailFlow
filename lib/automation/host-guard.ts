@@ -51,7 +51,15 @@ function evaluateAutomationTarget(rawUrl: string): { allowed: true; hostname: st
     return { allowed: false, hostname: rawUrl };
   }
 
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
+  // ws:/wss:는 http:/https:와 같은 호스트 판정 기준을 적용한다 -- 이 자동화
+  // 대상 페이지(Next.js dev 서버로 구동될 때)는 HMR(Fast Refresh)을 위해
+  // 같은 오리진으로 WebSocket을 자동으로 여는데, 이를 무조건 차단하면 개발
+  // 환경 자체가 깨진다. ws:/wss:를 완전히 별개로 취급하지 않고 http:/https:
+  // 와 동일한 아래 호스트 allowlist를 통과해야만 허용되므로, 외부 호스트로의
+  // WebSocket은 여전히 차단된다(mock-browser-provider.ts의 guardWebSocket).
+  const isSecure = url.protocol === "https:" || url.protocol === "wss:";
+  const isInsecure = url.protocol === "http:" || url.protocol === "ws:";
+  if (!isSecure && !isInsecure) {
     return { allowed: false, hostname: url.hostname || rawUrl };
   }
 
@@ -66,7 +74,7 @@ function evaluateAutomationTarget(rawUrl: string): { allowed: true; hostname: st
   }
 
   const selfHost = currentDeploymentHostname();
-  if (url.protocol === "https:" && selfHost && hostname === selfHost) {
+  if (isSecure && selfHost && hostname === selfHost) {
     return { allowed: true, hostname };
   }
 

@@ -427,6 +427,23 @@ async function main() {
   // 리디렉션 후 재검증: 최종 주소가 허용 목록 밖이면 차단.
   assert.throws(() => hostGuard.assertPostNavigationTargetAllowed('https://www.korail.com/redirected'), (error) => error.code === 'AUTOMATION_TARGET_NOT_ALLOWED');
 
+  // 1단계 결함 수정 회귀 테스트: ws:/wss:도 http:/https:와 동일한 호스트
+  // allowlist를 통과해야 한다 -- mock-browser-provider.ts의 guardWebSocket이
+  // isAutomationTargetAllowed()를 WebSocket URL에도 그대로 재사용하므로,
+  // 이 판정이 http/https만 허용하던 예전 동작 그대로면 Next.js dev 서버의
+  // 정상적인 HMR WebSocket(같은 오리진, ws://localhost:.../_next/webpack-hmr)
+  // 까지 전부 차단해 자동화 페이지 탐색 자체가 실패한다(실제로 재현해 확인한
+  // 회귀). 같은 오리진 ws:는 허용되고, 외부 호스트로의 ws:/wss:는 여전히
+  // 차단되어야 한다.
+  assert.equal(hostGuard.isAutomationTargetAllowed('ws://localhost:3000/_next/webpack-hmr'), true, '같은 오리진(localhost) HMR WebSocket은 허용되어야 한다');
+  assert.equal(hostGuard.isAutomationTargetAllowed('ws://127.0.0.1:3000/_next/webpack-hmr'), true);
+  assert.equal(hostGuard.isAutomationTargetAllowed('wss://www.korail.com/socket'), false, '외부 호스트로의 wss:는 차단되어야 한다');
+  assert.equal(hostGuard.isAutomationTargetAllowed('ws://198.51.100.10/socket'), false, '외부 IP로의 ws:는 차단되어야 한다');
+  await withEnv({ VERCEL_URL: 'rail-flow-git-feat-example-dhmailing.vercel.app' }, async () => {
+    assert.equal(hostGuard.isAutomationTargetAllowed('wss://rail-flow-git-feat-example-dhmailing.vercel.app/socket'), true, '이 배포 자신의 호스트로의 wss:는 허용되어야 한다');
+    assert.equal(hostGuard.isAutomationTargetAllowed('ws://rail-flow-git-feat-example-dhmailing.vercel.app/socket'), false, '자기 호스트라도 평문 ws:(비-https 등가)는 https:와 동일한 규칙에 따라 차단되어야 한다');
+  });
+
   // -- 17. Production에서 자동화 API 503 ------------------------------------
   await withEnv({ VERCEL_ENV: 'production', ...DEV_ENABLED }, async () => {
     const req = (url, init = {}) => new NextRequest(url, { ...init, headers: { origin: 'https://rail-flow-ten.vercel.app', ...(init.headers || {}) } });

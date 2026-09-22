@@ -1,6 +1,6 @@
 import "server-only";
 
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type Page, type WebSocket } from "playwright";
 
 import { assertPostNavigationTargetAllowed, buildAutomationTargetUrl, isAutomationTargetAllowed } from "@/lib/automation/host-guard";
 import { AutomationError, type SeatAutomationProvider } from "@/lib/automation/types";
@@ -25,6 +25,22 @@ import { AutomationError, type SeatAutomationProvider } from "@/lib/automation/t
 // keep Playwright's browsers in the default cache location.
 const CHROMIUM_EXECUTABLE_PATH = process.env.PLAYWRIGHT_CHROMIUM_PATH || "/opt/pw-browsers/chromium";
 
+// Playwright의 WebSocket 클래스는 관찰 전용 프록시라 close()를 제공하지
+// 않는다 -- 연결을 직접 끊을 방법이 없으므로, 허용되지 않은 호스트로의
+// WebSocket을 감지하면 즉시 browser.close()로 브라우저 프로세스 전체를
+// 강제 종료한다(모든 페이지·연결이 함께 끊긴다). page.route()/context.route()
+// 는 WebSocket 업그레이드 요청 자체를 가로채지 못하는 Playwright의 알려진
+// 한계라 "전송 전 차단"이 아니라 "연결 성립 직후 즉시 차단"이다 -- 이
+// fixture와 /demo/booking-simulator 페이지는 애초에 WebSocket을 전혀 쓰지
+// 않으므로 지금은 도달할 일이 없는 방어 심화 계층이다. ws:/wss:는
+// isAutomationTargetAllowed()가 http/https만 허용하므로 이 호출은 항상
+// false를 반환해 사실상 "모든 WebSocket 차단"으로 동작한다.
+function guardWebSocket(ws: WebSocket, browser: Browser): void {
+  if (!isAutomationTargetAllowed(ws.url())) {
+    void browser.close();
+  }
+}
+
 async function withAutomationPage<T>(pathAndQuery: string, run: (page: Page) => Promise<T>): Promise<T> {
   // Throws AUTOMATION_TARGET_NOT_ALLOWED and never launches a browser at all
   // if the target is not allowed -- see host-guard.ts.
@@ -33,23 +49,29 @@ async function withAutomationPage<T>(pathAndQuery: string, run: (page: Page) => 
   let browser: Browser | null = null;
   try {
     browser = await chromium.launch({ executablePath: CHROMIUM_EXECUTABLE_PATH, headless: true });
-    const page = await browser.newPage();
-
-    // Request-level interception -- registered *before* any navigation, so
-    // every request this page ever makes (the initial navigation itself,
-    // any redirect the response triggers, any subresource) is checked
-    // against the allowlist and aborted before it leaves the browser if it
-    // fails. Checking only the final page.url() after goto() resolves would
-    // be too late for a request that was already sent as part of a redirect
-    // chain -- this is the "전송 전에 차단" guarantee, not just a
-    // post-hoc URL check.
-    await page.route("**/*", (route) => {
+    // serviceWorkers: "block" -- 이 자동화가 여는 대상(/demo/booking-simulator)은
+    // 현재 Service Worker를 등록하지 않지만(app/page.tsx의 "/"에서만 등록),
+    // page.route()/context.route()는 Service Worker가 자체적으로 보내는
+    // 요청을 가로채지 못하는 것이 Playwright의 알려진 한계다. 이 옵션으로
+    // 이 컨텍스트에서는 Service Worker 등록 자체를 금지해, 향후 코드 변경으로
+    // 이 페이지가 SW를 등록하게 되더라도 같은 우회 경로가 생기지 않도록 막는다.
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    // context.route()는 page.route()와 달리 이 컨텍스트에서 열리는 새
+    // 페이지·팝업(window.open, target="_blank" 등)에도 동일하게 적용된다 --
+    // page 단위 등록은 원본 page 객체 하나만 보호하므로, 이 대상 페이지가
+    // 팝업을 여는 경우 그 팝업의 요청은 차단 범위 밖에 있었다.
+    await context.route("**/*", (route) => {
       const requestUrl = route.request().url();
       if (!isAutomationTargetAllowed(requestUrl)) {
         return route.abort();
       }
       return route.continue();
     });
+    const activeBrowser = browser;
+    context.on("page", (newPage) => newPage.on("websocket", (ws) => guardWebSocket(ws, activeBrowser)));
+
+    const page = await context.newPage();
+    page.on("websocket", (ws) => guardWebSocket(ws, activeBrowser));
 
     const response = await page.goto(targetUrl, { waitUntil: "networkidle", timeout: 20_000 });
 
@@ -64,7 +86,7 @@ async function withAutomationPage<T>(pathAndQuery: string, run: (page: Page) => 
 
     return await run(page);
   } finally {
-    if (browser) await browser.close();
+    if (browser) await browser.close().catch(() => undefined);
   }
 }
 

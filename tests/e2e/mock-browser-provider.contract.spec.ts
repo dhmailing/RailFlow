@@ -201,4 +201,50 @@ test.describe("mock-browser Provider 계약 테스트 (실제 Playwright 브라�
       await controlPage.close();
     }
   });
+
+  // 1단계 결함 수정 검증: page.route()는 등록된 그 page 객체 하나만 보호해,
+  // 그 페이지가 window.open()으로 새 팝업을 열면 팝업의 요청은 차단 범위
+  // 밖에 있었다. context.route()는 같은 컨텍스트에서 열리는 모든 새
+  // 페이지·팝업에도 자동으로 적용되므로(mock-browser-provider.ts가 실제로
+  // 쓰는 방식), 이를 실제 브라우저로 재현해 증명한다.
+  test("컨텍스트 레벨 차단 -- 팝업으로 열린 새 페이지의 요청도 차단된다", async ({ browser }) => {
+    const context = await browser.newContext();
+    try {
+      let sawDisallowedPopupRequest = false;
+      await context.route("**/*", (route) => {
+        const requestUrl = route.request().url();
+        if (!isAutomationTargetAllowed(requestUrl)) {
+          sawDisallowedPopupRequest = true;
+          return route.abort();
+        }
+        return route.continue();
+      });
+
+      const page = await context.newPage();
+      await page.goto("http://localhost:3000/demo/booking-simulator", { timeout: 15_000 });
+
+      const [popup] = await Promise.all([
+        context.waitForEvent("page"),
+        page.evaluate(() => {
+          window.open("https://www.korail.com/", "_blank");
+        }),
+      ]);
+
+      let popupNavigationError: unknown = null;
+      try {
+        await popup.waitForLoadState("load", { timeout: 8_000 });
+      } catch (error) {
+        popupNavigationError = error;
+      }
+
+      expect(sawDisallowedPopupRequest, "context.route()가 팝업의 요청도 가로채야 한다").toBe(true);
+      // 팝업이 실제로 korail.com 콘텐츠를 성공적으로 불러오지 못했어야 한다
+      // (탐색 자체가 실패했거나, 아직 about:blank/에러 페이지에 머물러야 함).
+      expect(popup.url()).not.toContain("korail.com");
+      void popupNavigationError;
+      await popup.close();
+    } finally {
+      await context.close();
+    }
+  });
 });
