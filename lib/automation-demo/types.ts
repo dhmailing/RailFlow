@@ -22,22 +22,34 @@ export type AutomationDemoStatus =
   | "RESERVING"
   | "PAYMENT_PENDING"
   | "COMPLETED"
+  | "PAYMENT_EXPIRED"
   | "CANCELLED";
 
 // "waiting": not yet checked this journey. "checking": selected but not yet
 // found. "sold_out": this candidate's own always_sold_out scenario reported
-// (never reopens in this fixture). "seat_found"/"stopped": set together, the
-// instant one selected candidate reports a seat (see scenarios.ts's
-// resolveCheckTick) -- mirrors the real Worker's single-state-machine
-// design: once the job leaves WATCHING it simply never checks the other
-// candidates again, so "stopped" is a display label, not a separate FSM.
-export type AutomationDemoCandidateStatus = "waiting" | "checking" | "sold_out" | "seat_found" | "stopped";
+// (never reopens in this fixture). "insufficient": the scenario's checksRequired
+// was reached and a seat exists, but the fixture's seat count (always 1) is
+// below the requested passenger count -- 결함 수정(1단계): 요청 인원보다
+// 적은 좌석을 예약 성공으로 처리하면 안 된다(§3). "seat_found"/"stopped":
+// set together, the instant one selected candidate reports a *sufficient*
+// seat (see scenarios.ts's resolveCheckTick) -- mirrors the real Worker's
+// single-state-machine design: once the job leaves WATCHING it simply never
+// checks the other candidates again, so "stopped" is a display label, not a
+// separate FSM.
+export type AutomationDemoCandidateStatus = "waiting" | "checking" | "sold_out" | "insufficient" | "seat_found" | "stopped";
 
 export type AutomationDemoIntervalSeconds = 1 | 2 | 3 | 4 | 5;
 
+// Mirrors lib/automation/types.ts's SeatClassPreference exactly (same three
+// values, same meaning) so this demo's UI reflects the same real-world
+// choice, even though it never imports that module (see header comment
+// above). "standard_only" excludes any candidate whose scenario can only
+// ever produce a "special" seat (candidate-3 in this fixture's scenario).
+export type AutomationDemoSeatClassPreference = "standard_only" | "standard_preferred" | "any";
+
 export type AutomationDemoScenario =
   | { kind: "always_sold_out" }
-  | { kind: "seat_after_n_checks"; checksRequired: number; seatClass: "standard" | "special" };
+  | { kind: "seat_after_n_checks"; checksRequired: number; seatClass: "standard" | "special"; seatCount: number };
 
 export type AutomationDemoCandidate = {
   id: string;
@@ -63,6 +75,8 @@ export type AutomationDemoCondition = {
   date: string; // yyyy-MM-dd
   timeRangeStart: string; // "HH:mm"
   timeRangeEnd: string; // "HH:mm"
+  passengers: number; // 1~4, mirrors lib/automation/types.ts's AutomationJobInput.passengers range
+  seatClassPreference: AutomationDemoSeatClassPreference;
 };
 
 // The entire journey is one object, exactly like lib/demo/types.ts's
@@ -86,7 +100,7 @@ export type AutomationDemoState = {
   updatedAt: string;
   // 경과 시간 계산 전용 필드(lib/demo/types.ts와 동일한 원칙). startedAt은
   // "자동 감시 시작" 순간(READY -> WATCHING)에만 설정되고, endedAt은
-  // COMPLETED/CANCELLED로 전이하는 순간에만 고정된다.
+  // COMPLETED/CANCELLED/PAYMENT_EXPIRED로 전이하는 순간에만 고정된다.
   startedAt: string | null;
   endedAt: string | null;
 };

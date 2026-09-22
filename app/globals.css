@@ -97,7 +97,10 @@
 body { word-break: keep-all; }
 main :is(.flex, .grid) > * { min-width: 0; }
 main :is(section, article, input, button, select) { max-width: 100%; }
-main input { width: 100%; min-width: 0; }
+/* checkbox/radio는 제외 -- width:100%를 적용하면 체크박스가 flex 행 전체 너비로
+   늘어나(replaced element라 flex-basis:auto가 이 폭을 그대로 반영) 같은 행의
+   다른 항목(텍스트)이 폭 0으로 밀려나는 실제 레이아웃 결함이 있었다. */
+main input:not([type="checkbox"]):not([type="radio"]) { width: 100%; min-width: 0; }
 main input[type="date"], main input[type="time"] { display:block; width:100%; min-height:32px; }
 img { max-width:100%; height:auto; object-fit:contain; }
 svg { flex-shrink:0; object-fit:contain; }

@@ -122,6 +122,10 @@ async function main() {
   for (const active of ['WATCHING', 'SEAT_FOUND', 'PURCHASE_CLICKING', 'RESERVING', 'PAYMENT_PENDING']) {
     assert.equal(canTransition(active, 'CANCELLED'), true, `${active} -> CANCELLED must be allowed`);
   }
+  assert.equal(canTransition('PAYMENT_PENDING', 'PAYMENT_EXPIRED'), true, 'PAYMENT_PENDING -> PAYMENT_EXPIRED(결제기한 만료) must be allowed');
+  // PAYMENT_EXPIRED는 비종료 상태이므로(다시 감시로 새 journey 시작 가능),
+  // 다른 모든 비종료 상태와 마찬가지로 CANCELLED로는 이동할 수 있다.
+  assert.equal(canTransition('PAYMENT_EXPIRED', 'CANCELLED'), true);
   const INVALID_PAIRS = [
     ['READY', 'SEAT_FOUND'],
     ['READY', 'PAYMENT_PENDING'],
@@ -137,6 +141,10 @@ async function main() {
     ['CANCELLED', 'READY'],
     ['CANCELLED', 'CANCELLED'],
     ['READY', 'READY'],
+    ['PAYMENT_EXPIRED', 'COMPLETED'],
+    ['PAYMENT_EXPIRED', 'READY'],
+    ['PAYMENT_EXPIRED', 'WATCHING'],
+    ['WATCHING', 'PAYMENT_EXPIRED'],
   ];
   for (const [from, to] of INVALID_PAIRS) {
     assert.equal(canTransition(from, to), false, `${from} -> ${to} must be rejected`);
@@ -145,14 +153,20 @@ async function main() {
   assert.equal(isTerminalStatus('COMPLETED'), true);
   assert.equal(isTerminalStatus('CANCELLED'), true);
   assert.equal(isTerminalStatus('WATCHING'), false);
+  assert.equal(isTerminalStatus('PAYMENT_EXPIRED'), false, 'PAYMENT_EXPIRED는 종료 상태가 아니다 -- 다시 감시(RESTART_WATCH)로 새 journey를 시작할 수 있어야 한다');
 
-  // -- 2. 후보 2개 미만이면 감시 시작 불가(§4) -------------------------------
+  // -- 2. 후보 0개면 감시 시작 불가, 1개만 선택해도 감시 시작 가능(1단계
+  //      결함 수정: 원하는 열차 한 편만 감시하는 것도 정상 시나리오다) -----
   {
+    assert.equal(MIN_SELECTED_CANDIDATES, 1);
+
     const base = createDefaultAutomationDemoState();
+    const noneSelected = automationDemoReducer(base, { type: 'START_WATCHING' });
+    assert.equal(noneSelected.status, 'READY', '후보를 하나도 선택하지 않으면 감시가 시작되면 안 된다');
+
     const oneSelected = automationDemoReducer(base, { type: 'TOGGLE_CANDIDATE', candidateId: 'auto-demo-candidate-2' });
-    const stillReady = automationDemoReducer(oneSelected, { type: 'START_WATCHING' });
-    assert.equal(stillReady.status, 'READY', '후보 1개만 선택한 상태에서는 감시가 시작되면 안 된다');
-    assert.equal(MIN_SELECTED_CANDIDATES, 2);
+    const watching = automationDemoReducer(oneSelected, { type: 'START_WATCHING' });
+    assert.equal(watching.status, 'WATCHING', '후보 1개만 선택해도 감시가 시작되어야 한다');
   }
 
   // -- 3. candidate-1(항상 매진) 반복 조회 -----------------------------------
@@ -205,13 +219,22 @@ async function main() {
     let candidates = createDefaultAutomationDemoState().candidates;
     let foundCandidateId = null;
     for (let tick = 0; tick < 5 && !foundCandidateId; tick += 1) {
-      const result = scenarios.resolveCheckTick(candidates, ['auto-demo-candidate-3'], tick);
+      const result = scenarios.resolveCheckTick(candidates, ['auto-demo-candidate-3'], tick, 1);
       candidates = result.candidates;
       foundCandidateId = result.foundCandidateId;
     }
     assert.equal(foundCandidateId, 'auto-demo-candidate-3');
     const candidate3 = candidates.find((c) => c.id === 'auto-demo-candidate-3');
     assert.equal(candidate3.checkCount, 5);
+  }
+  {
+    // 1단계 결함 수정 회귀 테스트: reducer의 실제 TICK 경로로(단독 함수
+    // 호출이 아니라) 후보를 단 1개만 선택해도 WATCHING -> SEAT_FOUND까지
+    // 정상 진행되어야 한다.
+    const { state, ticks } = runUntilSeatFound(['auto-demo-candidate-3']);
+    assert.equal(state.status, 'SEAT_FOUND', '후보 1개만 선택해도 좌석 발견까지 진행되어야 한다');
+    assert.equal(state.foundCandidateId, 'auto-demo-candidate-3');
+    assert.equal(ticks, 5);
   }
 
   // -- 6/7/8/9. 좌석발견 -> 구매클릭 -> 예약 -> 가상 예약번호·결제기한 -------
@@ -229,7 +252,7 @@ async function main() {
     // -- 10. 결제 완료는 사용자 액션(CONFIRM_PAYMENT)으로만 -------------------
     const stillPending = automationDemoReducer(pending, { type: 'TICK' });
     assert.equal(stillPending.status, 'PAYMENT_PENDING', 'PAYMENT_PENDING은 TICK으로 저절로 넘어가면 안 된다');
-    const completed = automationDemoReducer(pending, { type: 'CONFIRM_PAYMENT' });
+    const completed = withFixedDate(new Date('2026-01-01T00:05:00.000Z').getTime(), () => automationDemoReducer(pending, { type: 'CONFIRM_PAYMENT' }));
     assert.equal(completed.status, 'COMPLETED');
     assert.ok(completed.endedAt);
   }
@@ -282,6 +305,103 @@ async function main() {
     assert.equal(afterCancelAgain, state, 'CANCELLED 이후 다시 CANCEL을 보내도 상태가 바뀌면 안 된다');
   }
 
+  // -- 13b. 인원(passengers)이 좌석 수(항상 1석)보다 많으면 절대 예약 성공으로
+  //         이어지지 않는다(§3 결함 수정) ------------------------------------
+  {
+    let state = createDefaultAutomationDemoState();
+    state = automationDemoReducer(state, { type: 'SET_PASSENGERS', passengers: 2 });
+    assert.equal(state.condition.passengers, 2);
+    state = automationDemoReducer(state, { type: 'TOGGLE_CANDIDATE', candidateId: 'auto-demo-candidate-2' });
+    state = automationDemoReducer(state, { type: 'TOGGLE_CANDIDATE', candidateId: 'auto-demo-candidate-3' });
+    state = automationDemoReducer(state, { type: 'START_WATCHING' });
+    let ticks = 0;
+    while (state.status === 'WATCHING' && ticks < 50) {
+      state = automationDemoReducer(state, { type: 'TICK' });
+      ticks += 1;
+    }
+    assert.equal(state.status, 'WATCHING', '요청 인원 2명은 이 fixture(좌석 항상 1석)로는 절대 SEAT_FOUND로 이어지면 안 된다');
+    const candidate2 = state.candidates.find((c) => c.id === 'auto-demo-candidate-2');
+    assert.equal(candidate2.status, 'insufficient', '좌석은 있으나 인원 미달이면 insufficient로만 표시해야 한다');
+  }
+  // READY 상태가 아니면 SET_PASSENGERS는 무시되고, 범위를 벗어난 값도 거부된다.
+  {
+    const base = createDefaultAutomationDemoState();
+    const invalid = automationDemoReducer(base, { type: 'SET_PASSENGERS', passengers: 0 });
+    assert.equal(invalid.condition.passengers, base.condition.passengers, '0명은 거부되어야 한다');
+    const tooMany = automationDemoReducer(base, { type: 'SET_PASSENGERS', passengers: 5 });
+    assert.equal(tooMany.condition.passengers, base.condition.passengers, '4명 초과는 거부되어야 한다');
+  }
+
+  // -- 13c. 좌석등급 선호(standard_only)가 후보 선정에 반영된다(§3 결함 수정) --
+  {
+    assert.equal(scenarios.isCandidateCompatibleWithSeatClass({ scenario: { kind: 'seat_after_n_checks', seatClass: 'special' } }, 'standard_only'), false);
+    assert.equal(scenarios.isCandidateCompatibleWithSeatClass({ scenario: { kind: 'seat_after_n_checks', seatClass: 'standard' } }, 'standard_only'), true);
+    assert.equal(scenarios.isCandidateCompatibleWithSeatClass({ scenario: { kind: 'always_sold_out' } }, 'standard_only'), true);
+
+    let state = createDefaultAutomationDemoState();
+    state = automationDemoReducer(state, { type: 'TOGGLE_CANDIDATE', candidateId: 'auto-demo-candidate-2' });
+    state = automationDemoReducer(state, { type: 'TOGGLE_CANDIDATE', candidateId: 'auto-demo-candidate-3' });
+    assert.deepEqual(state.selectedCandidateIds.sort(), ['auto-demo-candidate-2', 'auto-demo-candidate-3']);
+    state = automationDemoReducer(state, { type: 'SET_SEAT_CLASS_PREFERENCE', preference: 'standard_only' });
+    assert.deepEqual(state.selectedCandidateIds, ['auto-demo-candidate-2'], 'standard_only로 바꾸면 특실만 있는 candidate-3(선택돼 있던)이 자동으로 선택 해제되어야 한다');
+
+    const reselect = automationDemoReducer(state, { type: 'TOGGLE_CANDIDATE', candidateId: 'auto-demo-candidate-3' });
+    assert.deepEqual(reselect.selectedCandidateIds, ['auto-demo-candidate-2'], 'standard_only 상태에서는 특실 후보를 다시 선택할 수 없어야 한다');
+  }
+
+  // -- 13d. 희망 시간대가 후보 선정에 반영된다(§3 결함 수정) -------------------
+  {
+    assert.equal(scenarios.isCandidateWithinTimeRange({ departAt: '07:11' }, { timeRangeStart: '05:00', timeRangeEnd: '10:00' }), true);
+    assert.equal(scenarios.isCandidateWithinTimeRange({ departAt: '11:00' }, { timeRangeStart: '05:00', timeRangeEnd: '10:00' }), false);
+    assert.equal(scenarios.isCandidateWithinTimeRange({ departAt: '00:30' }, { timeRangeStart: '23:00', timeRangeEnd: '02:00' }), true, '자정을 넘는 범위도 다뤄야 한다');
+
+    let state = createDefaultAutomationDemoState();
+    state = automationDemoReducer(state, { type: 'TOGGLE_CANDIDATE', candidateId: 'auto-demo-candidate-2' });
+    state = automationDemoReducer(state, { type: 'TOGGLE_CANDIDATE', candidateId: 'auto-demo-candidate-3' });
+    // candidate-3(08:05 출발)을 범위 밖으로 밀어낸다.
+    state = automationDemoReducer(state, { type: 'SET_TIME_RANGE_END', time: '07:30' });
+    assert.deepEqual(state.selectedCandidateIds, ['auto-demo-candidate-2'], '희망 종료 시각을 좁히면 범위를 벗어난 선택된 후보가 자동으로 해제되어야 한다');
+    const reselect = automationDemoReducer(state, { type: 'TOGGLE_CANDIDATE', candidateId: 'auto-demo-candidate-3' });
+    assert.deepEqual(reselect.selectedCandidateIds, ['auto-demo-candidate-2'], '희망 시간대 밖의 후보는 다시 선택할 수 없어야 한다');
+  }
+
+  // -- 13e. 결제기한 만료(PAYMENT_EXPIRED) -- 감시기한과 결제기한은 별개이며,
+  //         기한이 지난 가상 예약은 결제 완료로 바꿀 수 없다(§4 결함 수정) ----
+  {
+    const startMs = new Date('2026-01-01T00:00:00.000Z').getTime();
+    const { state: pending } = withFixedDate(startMs, () => {
+      const found = runUntilSeatFound(['auto-demo-candidate-2', 'auto-demo-candidate-3']).state;
+      const clicking = automationDemoReducer(found, { type: 'ADVANCE_TO_PURCHASE_CLICKING' });
+      const reserving = automationDemoReducer(clicking, { type: 'ADVANCE_TO_RESERVING' });
+      return { state: automationDemoReducer(reserving, { type: 'COMPLETE_RESERVATION' }) };
+    });
+    assert.equal(pending.status, 'PAYMENT_PENDING');
+    const deadlineMs = new Date(pending.paymentDeadline).getTime();
+
+    // 기한 전에는 EXPIRE_PAYMENT가 아무 효과가 없어야 한다.
+    const tooEarly = withFixedDate(deadlineMs - 1000, () => automationDemoReducer(pending, { type: 'EXPIRE_PAYMENT' }));
+    assert.equal(tooEarly.status, 'PAYMENT_PENDING', '결제기한 전에는 EXPIRE_PAYMENT가 무시되어야 한다');
+
+    // 기한이 지나면 자동으로 PAYMENT_EXPIRED로 전이된다.
+    const expired = withFixedDate(deadlineMs + 1000, () => automationDemoReducer(pending, { type: 'EXPIRE_PAYMENT' }));
+    assert.equal(expired.status, 'PAYMENT_EXPIRED');
+    assert.ok(expired.endedAt);
+
+    // 이미 만료된 뒤에는 CONFIRM_PAYMENT(결제 완료 클릭)를 보내도 완료로 바뀌면 안 된다.
+    const stillExpired = automationDemoReducer(expired, { type: 'CONFIRM_PAYMENT' });
+    assert.equal(stillExpired, expired, 'PAYMENT_EXPIRED 상태에서 CONFIRM_PAYMENT는 아무 효과가 없어야 한다');
+
+    // 방어적 이중 검증: PAYMENT_PENDING 상태 그대로 시스템 시계만 기한을 넘긴 뒤
+    // CONFIRM_PAYMENT를 직접 보내도(타이머가 아직 EXPIRE_PAYMENT를 보내기 전) 거부되어야 한다.
+    const lateConfirm = withFixedDate(deadlineMs + 1000, () => automationDemoReducer(pending, { type: 'CONFIRM_PAYMENT' }));
+    assert.equal(lateConfirm.status, 'PAYMENT_PENDING', '결제기한이 지난 뒤의 CONFIRM_PAYMENT는 COMPLETED로 이어지면 안 된다');
+
+    // PAYMENT_EXPIRED에서도 "다시 감시"로 새 journey를 시작할 수 있다.
+    const restarted = automationDemoReducer(expired, { type: 'RESTART_WATCH' });
+    assert.equal(restarted.status, 'WATCHING');
+    assert.equal(restarted.reservationNumber, null);
+  }
+
   // -- 14. 단일 슬롯 타이머 -- 재예약 시 이전 타이머가 항상 먼저 정리됨 -------
   {
     const controller = timerModule.createAutomationDemoTimerController();
@@ -319,6 +439,41 @@ async function main() {
 
     storage.setItem('railflow-automation-demo-v1', JSON.stringify({ ...state, foundCandidateId: 'not-a-real-candidate-id', status: 'SEAT_FOUND', reservationNumber: null, paymentDeadline: null }));
     assert.equal(storageModule.readAutomationDemoState(storage), null, '존재하지 않는 foundCandidateId는 거부해야 한다');
+
+    // 15b. 새 스키마 필드(passengers/seatClassPreference/seatCount/PAYMENT_EXPIRED)가
+    // 손상되거나 범위를 벗어난 값도 안전하게 거부되어야 한다.
+    storage.setItem('railflow-automation-demo-v1', JSON.stringify({ ...state, condition: { ...state.condition, passengers: 0 } }));
+    assert.equal(storageModule.readAutomationDemoState(storage), null, 'passengers=0은 거부해야 한다');
+
+    storage.setItem('railflow-automation-demo-v1', JSON.stringify({ ...state, condition: { ...state.condition, passengers: 5 } }));
+    assert.equal(storageModule.readAutomationDemoState(storage), null, 'passengers=5(최대 4명 초과)는 거부해야 한다');
+
+    storage.setItem('railflow-automation-demo-v1', JSON.stringify({ ...state, condition: { ...state.condition, seatClassPreference: 'vip_only' } }));
+    assert.equal(storageModule.readAutomationDemoState(storage), null, '정의되지 않은 seatClassPreference는 거부해야 한다');
+
+    const conditionWithoutPassengers = { ...state.condition };
+    delete conditionWithoutPassengers.passengers;
+    storage.setItem('railflow-automation-demo-v1', JSON.stringify({ ...state, condition: conditionWithoutPassengers }));
+    assert.equal(storageModule.readAutomationDemoState(storage), null, 'passengers 필드가 아예 없는 구버전 상태는 거부해야 한다(임의 기본값으로 보완하지 않는다)');
+
+    const badCandidates = state.candidates.map((c) => (c.scenario.kind === 'seat_after_n_checks' ? { ...c, scenario: { ...c.scenario, seatCount: -1 } } : c));
+    storage.setItem('railflow-automation-demo-v1', JSON.stringify({ ...state, candidates: badCandidates }));
+    assert.equal(storageModule.readAutomationDemoState(storage), null, '음수 seatCount는 거부해야 한다');
+
+    const { state: expiredFixture } = (() => {
+      const found = runUntilSeatFound(['auto-demo-candidate-2', 'auto-demo-candidate-3']).state;
+      const clicking = automationDemoReducer(found, { type: 'ADVANCE_TO_PURCHASE_CLICKING' });
+      const reserving = automationDemoReducer(clicking, { type: 'ADVANCE_TO_RESERVING' });
+      const pending = automationDemoReducer(reserving, { type: 'COMPLETE_RESERVATION' });
+      return { state: withFixedDate(new Date(pending.paymentDeadline).getTime() + 1000, () => automationDemoReducer(pending, { type: 'EXPIRE_PAYMENT' })) };
+    })();
+    assert.equal(expiredFixture.status, 'PAYMENT_EXPIRED');
+    storageModule.writeAutomationDemoState(storage, expiredFixture);
+    const roundTrippedExpired = storageModule.readAutomationDemoState(storage);
+    assert.deepEqual(roundTrippedExpired, expiredFixture, 'PAYMENT_EXPIRED 상태도 정상 저장·복원되어야 한다(endedAt 포함)');
+
+    storage.setItem('railflow-automation-demo-v1', JSON.stringify({ ...expiredFixture, endedAt: null }));
+    assert.equal(storageModule.readAutomationDemoState(storage), null, 'PAYMENT_EXPIRED인데 endedAt이 없으면 거부해야 한다');
   }
 
   // -- 16. fetch/XHR/WebSocket 호출 0회 --------------------------------------

@@ -34,3 +34,13 @@
 5. 기존 예매/자동예약/마이페이지 UX와 PWA 동작을 유지한다.
 6. 노출된 키 재사용 금지. 채팅으로 새 키를 요구하지 않는다. 서버 Secret에만 등록한다.
 7. 실제 조회·Safari 검증 전 공개 배포본을 교체하지 않는다.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
