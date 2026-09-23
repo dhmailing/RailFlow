@@ -67,7 +67,23 @@ async function readJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
+export type WatchJobPrefill = {
+  departure: string;
+  arrival: string;
+  date: string;
+  passengers: string;
+  candidates: { trainNumber: string; departAt: string; arriveAt: string }[];
+};
+
+export default function WatchJobsPanel({
+  user,
+  prefill = null,
+  onClearPrefill,
+}: {
+  user: AuthUser | null;
+  prefill?: WatchJobPrefill | null;
+  onClearPrefill?: () => void;
+}) {
   const [status, setStatus] = useState<ProviderStatus | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [jobs, setJobs] = useState<WatchJob[]>([]);
@@ -89,6 +105,34 @@ export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
   const [deviceChannel, setDeviceChannel] = useState<"email" | "telegram">("email");
   const [deviceToken, setDeviceToken] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  // 예매 탭에서 고른 후보를 이 폼에 그대로 채운다. 값 자체는 검색 결과에서
+  // 온 것이며 여기서 가상 열차를 새로 만들지 않는다. 사용자가 폼을 직접 고친
+  // 뒤 다시 덮어쓰지 않도록 후보 구성이 바뀔 때만 반영한다 -- React가 권장하는
+  // "렌더 중 props 변화에 맞춰 state 조정" 패턴이라 effect를 쓰지 않는다.
+  const prefillKey =
+    prefill && prefill.candidates.length > 0
+      ? [prefill.departure, prefill.arrival, prefill.date, prefill.passengers, ...prefill.candidates.map((c) => `${c.trainNumber}@${c.departAt}`)].join("|")
+      : "";
+  const [appliedPrefillKey, setAppliedPrefillKey] = useState("");
+  if (prefill && prefillKey && prefillKey !== appliedPrefillKey) {
+    setAppliedPrefillKey(prefillKey);
+    setDeparture(prefill.departure);
+    setArrival(prefill.arrival);
+    setDate(prefill.date);
+    setPassengers(prefill.passengers);
+    const departTimes = prefill.candidates.map((c) => c.departAt).sort();
+    setTimeRangeStart(departTimes[0]);
+    setTimeRangeEnd(departTimes[departTimes.length - 1]);
+    setCandidateRows(
+      prefill.candidates.slice(0, 3).map((candidate) => ({
+        trainNumber: candidate.trainNumber,
+        departAt: candidate.departAt,
+        arriveAt: candidate.arriveAt,
+        mockScenario: "",
+      })),
+    );
+  }
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -281,6 +325,11 @@ export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
           <ShieldAlert className="mx-auto mb-3 size-8 text-white/25" />
           <h2 className="text-lg font-extrabold">로그인하면 취소표 감시를 등록할 수 있어요</h2>
           <p className="mt-2 text-sm text-white/40">마이페이지 탭에서 RailFlow 계정으로 로그인하거나 새로 만들어주세요.</p>
+          {prefill && prefill.candidates.length > 0 && (
+            <p data-testid="prefill-pending" className="mt-3 rounded-xl border border-[#ff8a1f]/25 bg-[#ff8a1f]/[0.06] p-3 text-left text-xs leading-5 text-white/55">
+              선택한 후보 {prefill.candidates.length}편({prefill.departure} → {prefill.arrival} · {prefill.date})은 그대로 남아 있습니다. 로그인하면 이 조건이 등록 폼에 채워집니다.
+            </p>
+          )}
         </div>
         <Link
           href="/demo"
@@ -370,6 +419,22 @@ export default function WatchJobsPanel({ user }: { user: AuthUser | null }) {
       <Card className="rounded-2xl border-white/10 bg-black/30 py-0">
         <CardContent className="grid gap-3 p-4 sm:grid-cols-2">
           <p className="text-sm font-bold text-white/70 sm:col-span-2">감시 작업 등록</p>
+          {prefill && prefill.candidates.length > 0 && (
+            <div data-testid="prefill-banner" className="rounded-2xl border border-[#ff8a1f]/30 bg-[#ff8a1f]/[0.07] p-3 text-xs leading-5 text-white/60 sm:col-span-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-bold text-[#ffad62]">예매 탭에서 고른 후보 {prefill.candidates.length}편을 불러왔습니다</span>
+                {onClearPrefill && (
+                  <Button type="button" variant="ghost" onClick={onClearPrefill} className="h-auto rounded-lg px-2 py-1 text-xs text-white/45 hover:text-white">
+                    후보 비우기
+                  </Button>
+                )}
+              </div>
+              <p className="mt-1">
+                {prefill.departure} → {prefill.arrival} · {prefill.date} · {prefill.candidates.map((c) => `${c.trainNumber}(${c.departAt})`).join(", ")}
+              </p>
+              <p className="mt-1 text-white/40">아직 감시가 시작되지 않았습니다. 아래 내용을 확인하고 등록해야 시작됩니다.</p>
+            </div>
+          )}
           <label className="text-sm text-white/55">출발역
             <select value={departure} onChange={(e) => setDeparture(e.target.value)} className="mt-1 w-full rounded-lg border border-white/10 bg-[#111] p-2 text-white">
               {stationNames.map((n) => <option key={n} value={n}>{n}</option>)}

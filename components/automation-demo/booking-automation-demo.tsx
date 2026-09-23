@@ -134,7 +134,10 @@ export default function BookingAutomationDemo() {
     <main className="min-h-dvh bg-[#070707] text-white">
       <div className="mx-auto min-h-dvh max-w-3xl border-x border-white/[0.06] bg-[radial-gradient(circle_at_50%_-12%,rgba(255,137,31,0.15),transparent_34%)] pb-16">
         <header className="sticky top-0 z-30 border-b border-white/10 bg-[#070707]/95 backdrop-blur-xl">
-          <div className="flex items-center justify-between px-4 py-3 sm:px-6">
+          {/* flex-wrap + gap: 195 CSS px(390px 화면 200% 확대) 정도로 좁아지면
+              두 항목이 각자의 최소 폭보다 더 줄어들어(main :is(.flex,.grid) > *
+              { min-width: 0 }) 글자가 서로 겹쳤다. 공간이 없으면 줄을 나눈다. */}
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-3 sm:px-6">
             <Link href="/" className="text-sm font-bold text-white/60 hover:text-white">
               ← RailFlow로 돌아가기
             </Link>
@@ -207,11 +210,11 @@ function ConditionCard({
         <div className="grid grid-cols-2 gap-2">
           <div className="min-w-0 rounded-2xl border border-white/10 bg-black/35 p-3">
             <p className="mb-1 text-xs text-white/48">출발역</p>
-            <p className="truncate text-base font-bold">{state.condition.departure}</p>
+            <p className="break-words text-base font-bold">{state.condition.departure}</p>
           </div>
           <div className="min-w-0 rounded-2xl border border-white/10 bg-black/35 p-3">
             <p className="mb-1 text-xs text-white/48">도착역</p>
-            <p className="truncate text-base font-bold">{state.condition.arrival}</p>
+            <p className="break-words text-base font-bold">{state.condition.arrival}</p>
           </div>
         </div>
 
@@ -322,7 +325,11 @@ function CandidateRow({
       data-candidate-id={candidate.id}
       data-candidate-status={statusKey}
       data-check-count={candidate.checkCount}
-      className={`flex min-h-[44px] cursor-pointer items-center gap-3 rounded-2xl border p-3 transition ${toneClass} ${disabled ? "cursor-not-allowed" : ""}`}
+      // flex-wrap: 아주 좁은 폭(예: 390px 화면 200% 확대 = 195 CSS px)에서 상태
+      // 배지가 정보 영역을 폭 0 가까이로 밀어내던 문제를 막는다. 공간이
+      // 부족하면 배지가 아랫줄로 내려가고, 정보는 basis-40으로 최소 폭을
+      // 확보한다. 글자 축소나 잘라내기는 쓰지 않는다.
+      className={`flex min-h-[44px] cursor-pointer flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl border p-3 transition ${toneClass} ${disabled ? "cursor-not-allowed" : ""}`}
     >
       <input
         type="checkbox"
@@ -332,17 +339,17 @@ function CandidateRow({
         className="size-5 shrink-0 accent-[#ff8a1f]"
         aria-label={`${candidate.trainNumber} 선택`}
       />
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1 basis-40">
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-full bg-white/[0.08] px-2 py-0.5 text-[11px] font-bold text-white/60">{candidate.trainType}</span>
-          <span className="truncate text-sm font-bold">{candidate.trainNumber}</span>
+          <span className="min-w-0 break-words text-sm font-bold">{candidate.trainNumber}</span>
         </div>
         <p className="mt-1 text-xs text-white/45">
           {candidate.departAt} 출발 → {candidate.arriveAt} 도착 · {candidate.fareLabel} · 확인 {candidate.checkCount}회차
         </p>
       </div>
       <span
-        className={`shrink-0 max-w-[38%] rounded-full px-2.5 py-1 text-right text-[11px] font-bold leading-4 ${
+        className={`shrink-0 max-w-full whitespace-normal rounded-full px-2.5 py-1 text-right text-[11px] font-bold leading-4 ${
           statusKey === "seat_found" ? "bg-emerald-400/15 text-emerald-300" : statusKey === "stopped" || statusKey === "sold_out" ? "bg-white/[0.05] text-white/35" : "bg-white/[0.07] text-white/60"
         }`}
       >
