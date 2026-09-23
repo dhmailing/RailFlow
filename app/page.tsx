@@ -225,6 +225,9 @@ export default function Home() {
     setDeparture("");setArrival("");setDate(kstDate(7));setTime("00:00");setPassengers("1");
     setOnlyAvailable(false);setHasSearched(false);setTrains([]);setSearchError("");setSearching(false);
     setSearchedCondition({departure:"",arrival:"",date:""});
+    // 검색 조건을 비우면 그 조건에서 고른 후보도 함께 정리한다 -- 역·날짜가
+    // 빈 화면에 이전 구간의 후보만 남아 있지 않게 한다.
+    setSelectedCandidates([]);
   };
 
   const visibleTrains = useMemo(
@@ -545,6 +548,15 @@ export default function Home() {
                       <p className="mt-1 text-xs leading-5 text-white/45">
                         아직 감시가 시작되지 않았습니다. 자동예약 탭에서 조건을 확인하고 등록해야 합니다.
                       </p>
+                      {selectedCandidates.some(
+                        (candidate) =>
+                          conditionKeyOf(candidate.departure, candidate.arrival, candidate.date) !==
+                          conditionKeyOf(searchedCondition.departure, searchedCondition.arrival, searchedCondition.date),
+                      ) && (
+                        <p data-testid="candidate-stale-note" className="mt-1 text-xs leading-5 text-[#ffad62]">
+                          아래 후보는 지금 화면의 검색 조건이 아니라 이전에 조회한 조건에서 고른 것입니다. 각 줄의 구간·날짜를 확인해주세요.
+                        </p>
+                      )}
                       <ul className="mt-3 space-y-1.5">
                         {selectedCandidates.map((candidate) => (
                           <li key={candidate.id} className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/25 px-3 py-2 text-xs">
