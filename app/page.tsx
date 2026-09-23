@@ -7,6 +7,7 @@ import {
   ArrowLeftRight,
   BellRing,
   CalendarDays,
+  Check,
   Clock3,
   ExternalLink,
   LoaderCircle,
@@ -31,12 +32,25 @@ import type { RailProviderMode, TrainResult, TrainSearchResponse } from "@/lib/r
 import type { AuthUser } from "@/components/auth-panel";
 import { toast } from "sonner";
 
-type Reservation = TrainResult & {
-  route: string;
+// 예매 탭에서 고른 "자동예약 후보". 아직 어떤 서버 작업도 만들어지지 않은
+// 순수 선택 상태이며, 실제 감시는 자동예약 탭에서 조건을 등록해야 시작된다.
+// conditionKey는 이 후보가 어느 검색 조건(구간·날짜)에서 고른 것인지를 들고
+// 있어, 검색 조건이 바뀌면 오래된 후보가 남지 않도록 걸러내는 데 쓴다.
+type CandidateSelection = {
+  id: string;
+  number: string;
+  trainType: string;
+  depart: string;
+  arrive: string;
+  fare: string;
+  departure: string;
+  arrival: string;
   date: string;
-  status: "watching" | "secured";
-  createdAt: string;
 };
+
+function conditionKeyOf(departure: string, arrival: string, date: string) {
+  return `${departure}|${arrival}|${date}`;
+}
 
 type InstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -61,7 +75,7 @@ function kstDate(offsetDays: number) {
 const today = kstDate(0);
 const defaultTravelDate = kstDate(7);
 
-const storageKey = "railflow-reservations";
+const storageKey = "railflow-automation-candidates";
 const settingsKey = "railflow-settings";
 
 export default function Home() {
@@ -86,7 +100,7 @@ export default function Home() {
   const [providerMode, setProviderMode] = useState<RailProviderMode | "checking">("checking");
   const [resultMode, setResultMode] = useState<RailProviderMode>("demo");
   const [sourceLabel, setSourceLabel] = useState("연결 상태 확인 중");
-  const [reservations, setReservations] = useState<Reservation[]>([]);
+  const [selectedCandidates, setSelectedCandidates] = useState<CandidateSelection[]>([]);
   const [notifications, setNotifications] = useState(true);
   const [autoLogin, setAutoLogin] = useState(true);
   const [autoPay, setAutoPay] = useState(false);
@@ -132,7 +146,22 @@ export default function Home() {
     const restoreFrame = window.requestAnimationFrame(() => {
       try {
         const saved = window.localStorage.getItem(storageKey);
-        if (saved) setReservations(JSON.parse(saved));
+        if (saved) {
+          // 구버전(railflow-reservations)의 "가짜 예약" 항목이 남아 있을 수
+          // 있으므로, 현재 후보 모델의 필수 필드를 모두 갖춘 항목만 복원한다.
+          const parsed: unknown = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            setSelectedCandidates(
+              parsed.filter((item): item is CandidateSelection =>
+                !!item && typeof item === "object" &&
+                typeof (item as CandidateSelection).id === "string" &&
+                typeof (item as CandidateSelection).departure === "string" &&
+                typeof (item as CandidateSelection).arrival === "string" &&
+                typeof (item as CandidateSelection).date === "string",
+              ),
+            );
+          }
+        }
         const savedSettings = window.localStorage.getItem(settingsKey);
         if (savedSettings) {
           const settings = JSON.parse(savedSettings);
@@ -165,9 +194,9 @@ export default function Home() {
 
   useEffect(() => {
     if (!storageReady) return;
-    window.localStorage.setItem(storageKey, JSON.stringify(reservations));
+    window.localStorage.setItem(storageKey, JSON.stringify(selectedCandidates));
     window.localStorage.setItem(settingsKey, JSON.stringify({ notifications, autoLogin, autoPay }));
-  }, [reservations, notifications, autoLogin, autoPay, storageReady]);
+  }, [selectedCandidates, notifications, autoLogin, autoPay, storageReady]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -241,6 +270,16 @@ export default function Home() {
     const timeout=window.setTimeout(()=>controller.abort("timeout"),25000);
     setSearching(true);setSearchError("");setHasSearched(false);
     setSearchedCondition({departure,arrival,date});
+    // 검색 조건이 바뀌면 이전 구간·날짜에서 고른 후보는 더 이상 유효하지
+    // 않으므로 정리한다(다른 날짜의 후보가 조용히 남아 있지 않게 한다).
+    setSelectedCandidates((current) => {
+      const key = conditionKeyOf(departure, arrival, date);
+      const kept = current.filter((c) => conditionKeyOf(c.departure, c.arrival, c.date) === key);
+      if (kept.length !== current.length) {
+        toast.info("검색 조건이 바뀌어 이전 후보 선택을 해제했어요");
+      }
+      return kept;
+    });
 
     try {
       const response = await fetch(`/api/trains/search?${key}`, { cache: "no-store", signal:controller.signal });
@@ -267,27 +306,40 @@ export default function Home() {
     }
   };
 
-  const addReservation = (train: TrainResult) => {
-    if (reservations.some((reservation) => reservation.id === train.id)) {
-      toast.info("이미 자동예약 중인 열차예요");
-      setActiveTab("automation");
-      return;
-    }
+  // 선택은 "후보 담기"일 뿐이다 -- 이 시점에 서버 작업은 만들어지지 않고,
+  // 실제 감시는 자동예약 탭에서 조건을 등록해야 시작된다.
+  const MAX_CANDIDATES = 3;
+  const toggleCandidate = (train: TrainResult) => {
+    const conditionDeparture = searchedCondition.departure || departure;
+    const conditionArrival = searchedCondition.arrival || arrival;
+    const conditionDate = searchedCondition.date || date;
 
-    const reservation: Reservation = {
-      ...train,
-      route: `${searchedCondition.departure} → ${searchedCondition.arrival}`,
-      date: searchedCondition.date,
-      status: train.availability === "available" ? "secured" : "watching",
-      createdAt: new Date().toISOString(),
-    };
-
-    setReservations((current) => [reservation, ...current]);
-    toast.info("자동예약 탭에서 취소표 감시를 등록해주세요", {
-      description: `${train.number} · ${train.depart} 출발 · 실시간 좌석 감시는 로그인 후 자동예약 탭에서 조건을 등록해야 시작됩니다.`,
+    setSelectedCandidates((current) => {
+      if (current.some((candidate) => candidate.id === train.id)) {
+        return current.filter((candidate) => candidate.id !== train.id);
+      }
+      if (current.length >= MAX_CANDIDATES) {
+        toast.info(`후보는 최대 ${MAX_CANDIDATES}편까지 선택할 수 있어요`);
+        return current;
+      }
+      return [
+        ...current,
+        {
+          id: train.id,
+          number: train.number,
+          trainType: train.trainType,
+          depart: train.depart,
+          arrive: train.arrive,
+          fare: train.fare,
+          departure: conditionDeparture,
+          arrival: conditionArrival,
+          date: conditionDate,
+        },
+      ];
     });
-    setActiveTab("automation");
   };
+
+  const clearCandidates = () => setSelectedCandidates([]);
 
   const installApp = async () => {
     if (!installPrompt) {
@@ -483,8 +535,40 @@ export default function Home() {
                   </Link>
                 </div>
 
-                <div className="min-w-0">
-                  {searching ? <div role="status" className="rounded-2xl border border-white/10 p-6"><LoaderCircle className="mb-3 size-6 animate-spin text-orange-400"/>열차 정보를 조회하고 있습니다</div> : searchError ? <div role="alert" className="rounded-2xl border border-orange-400/30 p-5">{searchError}<Button className="mt-3" onClick={searchTrains}>다시 시도</Button></div> : <TrainResults hasSearched={hasSearched} trains={visibleTrains} departure={searchedCondition.departure || departure || "출발역"} arrival={searchedCondition.arrival || arrival || "도착역"} date={searchedCondition.date || date} mode={resultMode} sourceLabel={sourceLabel} onReserve={addReservation} />}
+                <div className="min-w-0 space-y-3">
+                  {selectedCandidates.length > 0 && (
+                    <div data-testid="candidate-tray" className="rounded-2xl border border-[#ff8a1f]/30 bg-[#ff8a1f]/[0.07] p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm font-extrabold text-[#ffad62]">자동예약 후보 {selectedCandidates.length}편 선택됨</p>
+                        <Button type="button" variant="ghost" onClick={clearCandidates} className="rounded-lg px-2 text-xs text-white/50 hover:text-white">전체 해제</Button>
+                      </div>
+                      <p className="mt-1 text-xs leading-5 text-white/45">
+                        아직 감시가 시작되지 않았습니다. 자동예약 탭에서 조건을 확인하고 등록해야 합니다.
+                      </p>
+                      <ul className="mt-3 space-y-1.5">
+                        {selectedCandidates.map((candidate) => (
+                          <li key={candidate.id} className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/25 px-3 py-2 text-xs">
+                            <span className="min-w-0 truncate text-white/70">
+                              {candidate.number} · {candidate.depart} 출발 · {candidate.departure}→{candidate.arrival} · {candidate.date}
+                            </span>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              aria-label={`${candidate.number} 후보 해제`}
+                              onClick={() => setSelectedCandidates((current) => current.filter((item) => item.id !== candidate.id))}
+                              className="shrink-0 rounded-lg px-2 text-white/45 hover:text-white"
+                            >
+                              해제
+                            </Button>
+                          </li>
+                        ))}
+                      </ul>
+                      <Button type="button" onClick={() => setActiveTab("automation")} className="mt-3 w-full rounded-xl bg-[#ff8a1f] font-extrabold text-black hover:bg-[#ff9d45]">
+                        자동예약 탭에서 조건 확인하기
+                      </Button>
+                    </div>
+                  )}
+                  {searching ? <div role="status" className="rounded-2xl border border-white/10 p-6"><LoaderCircle className="mb-3 size-6 animate-spin text-orange-400"/>열차 정보를 조회하고 있습니다</div> : searchError ? <div role="alert" className="rounded-2xl border border-orange-400/30 p-5">{searchError}<Button className="mt-3" onClick={searchTrains}>다시 시도</Button></div> : <TrainResults hasSearched={hasSearched} trains={visibleTrains} departure={searchedCondition.departure || departure || "출발역"} arrival={searchedCondition.arrival || arrival || "도착역"} date={searchedCondition.date || date} mode={resultMode} sourceLabel={sourceLabel} selectedIds={selectedCandidates.map((c) => c.id)} onToggleCandidate={toggleCandidate} />}
                 </div>
               </section>
             </TabsContent>
@@ -492,7 +576,25 @@ export default function Home() {
             <TabsContent value="automation" className="m-0">
               {activeTab === "automation" && (
                 <div className="space-y-8">
-                  <WatchJobsPanel user={authUser} />
+                  <WatchJobsPanel
+                    user={authUser}
+                    prefill={
+                      selectedCandidates.length > 0
+                        ? {
+                            departure: selectedCandidates[0].departure,
+                            arrival: selectedCandidates[0].arrival,
+                            date: selectedCandidates[0].date,
+                            passengers,
+                            candidates: selectedCandidates.map((candidate) => ({
+                              trainNumber: candidate.number,
+                              departAt: candidate.depart,
+                              arriveAt: candidate.arrive,
+                            })),
+                          }
+                        : null
+                    }
+                    onClearPrefill={clearCandidates}
+                  />
                   <div className="mx-auto max-w-3xl border-t border-white/10 pt-6">
                     <AutomationJobsPanel user={authUser} />
                   </div>
@@ -520,9 +622,11 @@ export default function Home() {
             </TabsContent>
           </div>
 
-          <TabsList className="fixed inset-x-0 bottom-0 z-40 mx-auto grid h-[78px] w-full max-w-6xl grid-cols-3 rounded-none border-t border-white/10 bg-[#090909]/95 p-0 text-white/45 shadow-[0_-18px_50px_rgba(0,0,0,0.35)] backdrop-blur-xl md:sticky md:bottom-5 md:h-16 md:w-[420px] md:rounded-[22px] md:border">
+          <TabsList
+            data-testid="bottom-nav"
+            className="fixed inset-x-0 bottom-0 z-40 mx-auto grid w-full max-w-6xl grid-cols-3 items-stretch rounded-none border-t border-white/10 bg-[#090909]/95 p-0 pb-[env(safe-area-inset-bottom)] text-white/45 shadow-[0_-18px_50px_rgba(0,0,0,0.35)] backdrop-blur-xl group-data-[orientation=horizontal]/tabs:h-auto md:sticky md:bottom-5 md:w-[420px] md:rounded-[22px] md:border md:pb-0">
             <NavTab value="booking" icon={<Ticket />} label="예매" />
-            <NavTab value="automation" icon={<RefreshCw />} label="자동예약" count={reservations.length} />
+            <NavTab value="automation" icon={<RefreshCw />} label="자동예약" count={selectedCandidates.length} />
             <NavTab value="settings" icon={<UserRound />} label="마이페이지" />
           </TabsList>
         </Tabs>
@@ -534,12 +638,20 @@ export default function Home() {
 
 function NavTab({ value, icon, label, count }: { value: string; icon: React.ReactNode; label: string; count?: number }) {
   return (
-    <TabsTrigger value={value} className="group h-full flex-col gap-1 rounded-none border-0 text-white/42 after:hidden data-[state=active]:bg-transparent data-[state=active]:text-[#ff8a1f] md:rounded-[18px] md:data-[state=active]:bg-white/[0.05]">
-      <span className="relative [&>svg]:size-5">
+    <TabsTrigger
+      value={value}
+      data-testid="bottom-nav-tab"
+      className="group h-auto min-h-14 flex-col justify-center gap-1 rounded-none border-0 px-1 py-2 text-white/42 after:hidden data-[state=active]:bg-transparent data-[state=active]:text-[#ff8a1f] md:rounded-[18px] md:data-[state=active]:bg-white/[0.05]"
+    >
+      <span className="relative inline-flex [&>svg]:size-5">
         {icon}
-        {!!count && <span className="absolute -right-3 -top-2 grid min-w-5 place-items-center rounded-full bg-[#ff8a1f] px-1 text-[10px] font-black text-black">{count}</span>}
+        {!!count && (
+          <span className="absolute -right-2.5 -top-1.5 grid min-w-4 place-items-center rounded-full bg-[#ff8a1f] px-1 text-[10px] font-black leading-4 text-black">
+            {count}
+          </span>
+        )}
       </span>
-      <span className="text-xs font-bold">{label}</span>
+      <span className="text-center text-xs font-bold leading-4">{label}</span>
     </TabsTrigger>
   );
 }
@@ -577,7 +689,8 @@ function TrainResults({
   date,
   mode,
   sourceLabel,
-  onReserve,
+  selectedIds,
+  onToggleCandidate,
 }: {
   hasSearched: boolean;
   trains: TrainResult[];
@@ -586,7 +699,8 @@ function TrainResults({
   date: string;
   mode: RailProviderMode;
   sourceLabel: string;
-  onReserve: (train: TrainResult) => void;
+  selectedIds: string[];
+  onToggleCandidate: (train: TrainResult) => void;
 }) {
   return (
     <section className="min-h-[460px] rounded-[28px] border border-white/[0.08] bg-[#0d0d0d]/80 p-4 sm:p-5 lg:min-h-[650px]">
@@ -628,15 +742,23 @@ function TrainResults({
                   <div className="mt-3 flex items-center gap-3"><strong className="text-2xl tracking-tight">{train.depart}</strong><span className="h-px w-8 bg-white/20" /><strong className="text-2xl tracking-tight">{train.arrive}</strong></div>
                   <p className="mt-1 text-xs text-white/38">{train.duration} · 성인 1인 {train.fare}</p>
                 </div>
-                {train.source === "tago" ? (
-                  <Button asChild className="h-11 rounded-xl bg-white/10 px-4 font-extrabold text-white hover:bg-white/15">
-                    <a href="https://www.korail.com/" target="_blank" rel="noreferrer">공식 예매 <ExternalLink className="size-4" /></a>
+                <div className="flex shrink-0 flex-col items-stretch gap-2">
+                  {train.source === "tago" && (
+                    <Button asChild className="rounded-xl bg-white/10 px-4 font-extrabold text-white hover:bg-white/15">
+                      <a href="https://www.korail.com/" target="_blank" rel="noreferrer">공식 예매 <ExternalLink className="size-4" /></a>
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    data-testid="candidate-toggle"
+                    data-train-id={train.id}
+                    aria-pressed={selectedIds.includes(train.id)}
+                    onClick={() => onToggleCandidate(train)}
+                    className={`rounded-xl px-4 font-extrabold ${selectedIds.includes(train.id) ? "bg-[#ff8a1f] text-black hover:bg-[#ff9d45]" : "border border-[#ff8a1f]/40 bg-transparent text-[#ffad62] hover:bg-[#ff8a1f]/10"}`}
+                  >
+                    {selectedIds.includes(train.id) ? <><Check className="size-4" /> 후보 선택됨</> : "자동예약 후보로 담기"}
                   </Button>
-                ) : (
-                  <Button type="button" onClick={() => onReserve(train)} className={`h-11 rounded-xl px-4 font-extrabold ${train.availability === "available" ? "bg-emerald-400 text-black hover:bg-emerald-300" : "bg-[#ff8a1f] text-black hover:bg-[#ff9d45]"}`}>
-                    {train.availability === "available" ? "바로예약" : "자동예약"}
-                  </Button>
-                )}
+                </div>
               </div>
             </article>
           ))}
