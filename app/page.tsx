@@ -61,6 +61,9 @@ const stations: string[] = [...stationNames];
 const SettingsView = dynamic(()=>import("@/components/rail-settings"),{loading:()=> <p role="status">설정 불러오는 중</p>});
 const AuthPanel = dynamic(()=>import("@/components/auth-panel"),{loading:()=> <p role="status">로그인 상태 불러오는 중</p>});
 const WatchJobsPanel = dynamic(()=>import("@/components/watch-jobs"),{loading:()=> <p role="status">취소표 감시 상태 불러오는 중</p>});
+// 실제 연동 패널. 사용자의 PC에서 도는 로컬 Agent와만 통신하며, 서버에서는
+// 렌더링하지 않는다(ssr:false) -- 127.0.0.1 접근은 브라우저에서만 의미가 있다.
+const LiveAgentPanel = dynamic(()=>import("@/components/live-agent-panel"),{ssr:false,loading:()=> <p role="status">실제 연동 상태 불러오는 중</p>});
 const AutomationJobsPanel = dynamic(()=>import("@/components/automation/automation-jobs"),{loading:()=> <p role="status">자동화 작업 상태 불러오는 중</p>});
 
 function kstDate(offsetDays: number) {
@@ -607,6 +610,9 @@ export default function Home() {
                     }
                     onClearPrefill={clearCandidates}
                   />
+                  <div className="mx-auto max-w-3xl border-t border-white/10 pt-6">
+                    <LiveAgentPanel />
+                  </div>
                   <div className="mx-auto max-w-3xl border-t border-white/10 pt-6">
                     <AutomationJobsPanel user={authUser} />
                   </div>
