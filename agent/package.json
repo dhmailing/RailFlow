@@ -1,0 +1,16 @@
+{
+  "name": "railflow-local-agent",
+  "version": "0.8.0",
+  "private": true,
+  "type": "module",
+  "description": "RailFlow Local Automation Agent -- 사용자의 PC에서 화면이 보이는 브라우저로 공식 예매 화면을 조회하고, 승인받은 경우에만 결제 직전까지 예약한다.",
+  "bin": { "railflow-agent": "./railflow-agent.mjs" },
+  "scripts": {
+    "capture": "node railflow-agent.mjs capture",
+    "check": "node railflow-agent.mjs check",
+    "watch": "node railflow-agent.mjs watch",
+    "test": "node --test ../tests/agent"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": { "playwright": "^1.63.0" }
+}

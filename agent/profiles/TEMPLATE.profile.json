@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "operator": "",
+  "host": "",
+  "capturedAt": null,
+  "capturedFromUrl": null,
+  "verified": false,
+  "urls": {
+    "searchEntry": "",
+    "reservationList": ""
+  },
+  "vocabulary": {
+    "soldOut": [],
+    "availableStandard": [],
+    "availableFirst": [],
+    "waitlist": [],
+    "additionalVerification": [],
+    "queueOrRestricted": [],
+    "loginRequired": [],
+    "reserveControl": [],
+    "reservationListLink": [],
+    "reservationSuccess": [],
+    "paymentDeadlineLabel": [],
+    "reservationNumberLabel": []
+  },
+  "formFields": {
+    "departure": "",
+    "arrival": "",
+    "date": "",
+    "passengers": "",
+    "submit": ""
+  },
+  "paymentScreenMarkers": [],
+  "notes": "빈 틀입니다. railflow-agent capture 로 만든 초안의 observed 목록을 보고 실제 화면의 글자로 채운 뒤 verified 를 true 로 바꾸세요."
+}

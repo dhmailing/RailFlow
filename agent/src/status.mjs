@@ -1,0 +1,130 @@
+// RailFlow Local Automation Agent -- 상태 어휘(Vocabulary).
+//
+// 이 파일은 Agent와 RailFlow 웹 UI가 공유하는 상태 이름의 단일 출처다.
+// 웹 쪽 복사본은 lib/live/agent-protocol.ts에 있고, 두 파일이 어긋나면
+// tests/agent/protocol-parity.test.mjs가 실패한다.
+//
+// 중요: 여기 있는 상태는 "실제 공식 화면에서 읽은 것"만 표현한다.
+// 시뮬레이터(lib/automation-demo/**, lib/demo/**)의 상태와 절대 섞지 않는다.
+
+/**
+ * 좌석 상태. 화면에 실제로 표시된 내용만 여기로 정규화한다.
+ *
+ * - 좌석 "수"가 화면에 없으면 수량을 추정하지 않는다. AVAILABLE_* 는
+ *   "예약 가능한 자리가 표시됐다"는 뜻이지 몇 석인지가 아니다.
+ * - 조회 실패·선택자 실패·로딩 중은 절대 SOLD_OUT 으로 만들지 않는다.
+ *   그런 경우는 UNKNOWN 이거나 PROVIDER_CHANGED 다.
+ */
+export const SeatStatus = Object.freeze({
+  AVAILABLE_STANDARD: "AVAILABLE_STANDARD",
+  AVAILABLE_FIRST: "AVAILABLE_FIRST",
+  AVAILABLE_ANY: "AVAILABLE_ANY",
+  SOLD_OUT: "SOLD_OUT",
+  WAITLIST_AVAILABLE: "WAITLIST_AVAILABLE",
+  AUTH_REQUIRED: "AUTH_REQUIRED",
+  ADDITIONAL_VERIFICATION_REQUIRED: "ADDITIONAL_VERIFICATION_REQUIRED",
+  QUEUE_OR_ACCESS_RESTRICTED: "QUEUE_OR_ACCESS_RESTRICTED",
+  PROVIDER_CHANGED: "PROVIDER_CHANGED",
+  UNKNOWN: "UNKNOWN",
+});
+
+export const SEAT_STATUSES = Object.freeze(Object.keys(SeatStatus));
+
+/** 조건을 만족할 수 있는(=예약 클릭 후보가 되는) 좌석 상태. */
+export const SEAT_STATUS_BOOKABLE = Object.freeze([
+  SeatStatus.AVAILABLE_STANDARD,
+  SeatStatus.AVAILABLE_FIRST,
+  SeatStatus.AVAILABLE_ANY,
+]);
+
+/**
+ * 즉시 자동 동작을 멈춰야 하는 좌석 상태(지침 §17).
+ * 우회하거나 자동으로 해결하려 시도하지 않는다.
+ */
+export const SEAT_STATUS_HALT = Object.freeze([
+  SeatStatus.AUTH_REQUIRED,
+  SeatStatus.ADDITIONAL_VERIFICATION_REQUIRED,
+  SeatStatus.QUEUE_OR_ACCESS_RESTRICTED,
+  SeatStatus.PROVIDER_CHANGED,
+]);
+
+/** 작업(Job) 상태. RailFlow 자동예약 화면이 그대로 표시한다. */
+export const JobState = Object.freeze({
+  IDLE: "IDLE",
+  LAUNCHING_BROWSER: "LAUNCHING_BROWSER",
+  WAITING_MANUAL_LOGIN: "WAITING_MANUAL_LOGIN",
+  CONNECTED: "CONNECTED",
+  SEARCHING_TRAIN: "SEARCHING_TRAIN",
+  TRAIN_CONFIRMED: "TRAIN_CONFIRMED",
+  WATCHING_SOLD_OUT: "WATCHING_SOLD_OUT",
+  SEAT_FOUND: "SEAT_FOUND",
+  AWAITING_ARM_CONFIRMATION: "AWAITING_ARM_CONFIRMATION",
+  RESERVING: "RESERVING",
+  VERIFYING_RESERVATION: "VERIFYING_RESERVATION",
+  RESERVED_PAYMENT_REQUIRED: "RESERVED_PAYMENT_REQUIRED",
+  AUTH_REQUIRED: "AUTH_REQUIRED",
+  ADDITIONAL_VERIFICATION_REQUIRED: "ADDITIONAL_VERIFICATION_REQUIRED",
+  QUEUE_OR_ACCESS_RESTRICTED: "QUEUE_OR_ACCESS_RESTRICTED",
+  PROVIDER_CHANGED: "PROVIDER_CHANGED",
+  RESULT_UNCERTAIN_USER_CHECK_REQUIRED: "RESULT_UNCERTAIN_USER_CHECK_REQUIRED",
+  RECONCILIATION_REQUIRED: "RECONCILIATION_REQUIRED",
+  STOPPED_BY_USER: "STOPPED_BY_USER",
+  FAILED: "FAILED",
+});
+
+export const JOB_STATES = Object.freeze(Object.keys(JobState));
+
+/**
+ * 더 이상 자동으로 진행하지 않는 상태. 여기 들어가면 Agent는 새 조회도,
+ * 새 클릭도 하지 않는다. 벗어나려면 사용자의 명시적인 재개가 필요하다.
+ */
+export const TERMINAL_JOB_STATES = Object.freeze([
+  JobState.RESERVED_PAYMENT_REQUIRED,
+  JobState.AUTH_REQUIRED,
+  JobState.ADDITIONAL_VERIFICATION_REQUIRED,
+  JobState.QUEUE_OR_ACCESS_RESTRICTED,
+  JobState.PROVIDER_CHANGED,
+  JobState.RESULT_UNCERTAIN_USER_CHECK_REQUIRED,
+  JobState.RECONCILIATION_REQUIRED,
+  JobState.STOPPED_BY_USER,
+  JobState.FAILED,
+]);
+
+/**
+ * 사용자가 직접 확인해야 끝나는 상태. UI에서 눈에 띄게 표시하고,
+ * "실패"나 "취소"로 뭉뚱그리지 않는다.
+ */
+export const USER_ACTION_REQUIRED_STATES = Object.freeze([
+  JobState.RESERVED_PAYMENT_REQUIRED,
+  JobState.AUTH_REQUIRED,
+  JobState.ADDITIONAL_VERIFICATION_REQUIRED,
+  JobState.RESULT_UNCERTAIN_USER_CHECK_REQUIRED,
+  JobState.RECONCILIATION_REQUIRED,
+]);
+
+/** 실행 모드. 예약 클릭은 ARMED 에서만 가능하다(지침 §10). */
+export const RunMode = Object.freeze({
+  LIVE_READ_ONLY: "LIVE_READ_ONLY",
+  LIVE_RESERVATION_ARMED: "LIVE_RESERVATION_ARMED",
+});
+
+/** 중단 사유 코드. docs/V0.8-STATUS-CODES.md 와 1:1로 대응한다. */
+export const HaltReason = Object.freeze({
+  USER_STOP: "USER_STOP",
+  CAPTCHA_DETECTED: "CAPTCHA_DETECTED",
+  QUEUE_DETECTED: "QUEUE_DETECTED",
+  ACCESS_RESTRICTED: "ACCESS_RESTRICTED",
+  ADDITIONAL_VERIFICATION: "ADDITIONAL_VERIFICATION",
+  LOGIN_EXPIRED: "LOGIN_EXPIRED",
+  UNEXPECTED_PAYMENT_SCREEN: "UNEXPECTED_PAYMENT_SCREEN",
+  PROVIDER_PROFILE_REQUIRED: "PROVIDER_PROFILE_REQUIRED",
+  PROVIDER_LAYOUT_CHANGED: "PROVIDER_LAYOUT_CHANGED",
+  TRAIN_IDENTIFICATION_UNCERTAIN: "TRAIN_IDENTIFICATION_UNCERTAIN",
+  RESERVATION_RESULT_UNCERTAIN: "RESERVATION_RESULT_UNCERTAIN",
+  EXISTING_RESERVATION_FOUND: "EXISTING_RESERVATION_FOUND",
+  HOST_NOT_ALLOWED: "HOST_NOT_ALLOWED",
+  NETWORK_BACKOFF_EXHAUSTED: "NETWORK_BACKOFF_EXHAUSTED",
+  LOCK_LOST: "LOCK_LOST",
+});
+
+export const HALT_REASONS = Object.freeze(Object.keys(HaltReason));
