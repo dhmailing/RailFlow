@@ -6,6 +6,14 @@
 // 여기 있는 상태는 전부 "실제 공식 화면에서 읽은 것"이다. 시뮬레이터
 // (lib/automation-demo/**, lib/demo/**)의 상태와 절대 섞어 쓰지 않는다.
 
+/**
+ * 로컬 Agent가 띄우는 화면 주소.
+ *
+ * 공개 배포본(https)이 이 주소를 직접 호출하지는 않는다 -- 브라우저가
+ * 막는다(docs/V0.8-LOCAL-CONNECTION.md). 사용자에게 안내하는 용도다.
+ */
+export const LOCAL_CONSOLE_URL = "http://127.0.0.1:4319/";
+
 export const SEAT_STATUSES = [
   "AVAILABLE_STANDARD",
   "AVAILABLE_FIRST",

@@ -15,7 +15,7 @@ import { assertTransition, isTerminal, resolveUserStopTarget } from "./machine.m
 import { JobState, RunMode, SeatStatus, HaltReason, SEAT_STATUS_HALT } from "./status.mjs";
 import { activeJobKey, seatStatusSatisfies } from "./match.mjs";
 import { assertProviderContract } from "./providers/provider-contract.mjs";
-import { ProviderHalt } from "./providers/sr-srt-live-provider.mjs";
+import { ProviderHalt } from "./providers/provider-halt.mjs";
 
 const SEAT_STATUS_TO_JOB_STATE = Object.freeze({
   [SeatStatus.AUTH_REQUIRED]: JobState.AUTH_REQUIRED,

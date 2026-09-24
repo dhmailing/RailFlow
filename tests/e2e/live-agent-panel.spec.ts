@@ -15,13 +15,28 @@ async function openAutomationTab(page: import("@playwright/test").Page) {
   await page.getByTestId("live-agent-panel").waitFor();
 }
 
-test("Agent가 없으면 실행 방법을 안내한다 -- 자동예약 탭", async ({ page }) => {
+test("공개 배포본은 PC에서 실행하는 방법만 안내한다 -- 자동예약 탭", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openAutomationTab(page);
 
-  await expect(page.getByText("실제 연동 · PC에서 Agent 실행 필요")).toBeVisible();
+  await expect(page.getByText("실제 좌석 조회 · PC에서 실행합니다")).toBeVisible();
+  await expect(page.getByText(/2-RailFlow실행\.cmd/)).toBeVisible();
   // 화면을 꺼도 도는 서버 감시로 설명하지 않는다.
-  await expect(page.getByText(/브라우저를 닫거나 PC가 절전에 들어가면 감시가 멈춥니다/)).toBeVisible();
+  await expect(page.getByText(/Agent 창을 닫거나 PC가 절전에 들어가면 조회가 멈춥니다/)).toBeVisible();
+});
+
+test("공개 배포본은 로컬 Agent에 요청을 보내지 않는다", async ({ page }) => {
+  // https 페이지가 http://127.0.0.1 을 호출하는 구조는 브라우저가 막는다.
+  // 그래서 배포본은 아예 시도하지 않는다(docs/V0.8-LOCAL-CONNECTION.md).
+  const attempts: string[] = [];
+  page.on("request", (request) => {
+    const url = request.url();
+    if (url.includes("127.0.0.1") || /:\/\/localhost:4319/.test(url)) attempts.push(url);
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openAutomationTab(page);
+  await page.waitForTimeout(2500);
+  expect(attempts, "배포본이 로컬 Agent를 호출했다").toEqual([]);
 });
 
 test("실제 조회 없이 감시 중·예약 성공을 표시하지 않는다", async ({ page }) => {
@@ -34,18 +49,20 @@ test("실제 조회 없이 감시 중·예약 성공을 표시하지 않는다",
   expect(panel).not.toContain("예약 성공 · 결제 필요");
   expect(panel).not.toContain("좌석 없음 · 감시 중");
   expect(panel).not.toContain("좌석 발견");
+  expect(panel).not.toContain("예약 요청 중");
 });
 
 test("실제 연동 패널은 계정 정보를 묻지 않는다", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openAutomationTab(page);
 
-  // 비밀번호 입력 칸이 있으면 안 된다.
+  // 배포본 패널에는 입력 칸 자체가 없다. 계정 정보를 받을 수 있는 통로가
+  // 아예 없다는 뜻이다. ("OTP를 저장하지 않는다" 같은 안내 문구는 있어도 된다 --
+  // 문구 유무가 아니라 입력 통로의 유무가 검사 대상이다.)
   await expect(page.locator('input[type="password"]')).toHaveCount(0);
-  const panel = await page.getByTestId("live-agent-panel").innerText();
-  for (const word of ["OTP", "보안문자", "카드번호"]) {
-    expect(panel).not.toContain(word);
-  }
+  const panel = page.getByTestId("live-agent-panel");
+  await expect(panel.locator("input")).toHaveCount(0);
+  await expect(panel.locator("form")).toHaveCount(0);
 });
 
 test("실제 연동 안내가 좁은 화면에서도 카드 밖으로 넘치지 않는다", async ({ page }) => {

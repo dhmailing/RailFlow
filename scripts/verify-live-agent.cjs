@@ -73,9 +73,11 @@ check("쿠키·세션을 파일로 내보내지 않는다", () => {
 
 check("브라우저는 항상 화면이 보이는 모드로 뜬다", () => {
   assert(!/headless:\s*true/.test(agentCode), "headless: true 가 있다");
-  const launches = agentCode.match(/launchPersistentContext\([\s\S]{0,300}?\)/g) ?? [];
-  assert(launches.length > 0, "브라우저 실행 코드를 찾지 못했다");
-  for (const block of launches) {
+  // 호출 뒤 400자를 통째로 본다. 인자 안의 괄호에서 끊기지 않게 하기 위해서다.
+  const launchAt = [...agentCode.matchAll(/launchPersistentContext\(/g)].map((m) => m.index);
+  assert(launchAt.length > 0, "브라우저 실행 코드를 찾지 못했다");
+  for (const at of launchAt) {
+    const block = agentCode.slice(at, at + 400);
     assert(/headless:\s*false/.test(block), "headless: false 가 명시되지 않은 실행이 있다");
   }
 });
@@ -99,7 +101,7 @@ check("Provider 계약이 차단 우회·결제 자동화 이름을 거부한다
 });
 
 check("실제 Provider에 차단 우회·결제 기능이 없다", () => {
-  const body = stripComments(read("agent/src/providers/sr-srt-live-provider.mjs"));
+  const body = stripComments(read("agent/src/providers/live-booking-provider.mjs"));
   for (const pattern of [/captcha/i, /bypass/i, /proxy/i, /userAgent/i, /setExtraHTTPHeaders/]) {
     assert(!pattern.test(body), `우회로 보이는 코드가 있다: ${pattern}`);
   }
@@ -115,7 +117,7 @@ check("탐지 회피용 무작위 지연이 없다", () => {
 
 // --- 3. 추측한 선택자가 없다 -------------------------------------------------
 check("Provider에 하드코딩된 사이트 문구·선택자가 없다", () => {
-  const provider = read("agent/src/providers/sr-srt-live-provider.mjs");
+  const provider = read("agent/src/providers/live-booking-provider.mjs");
   const body = provider.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   // 사이트 문구를 "요소를 찾거나 화면과 비교하는 데" 쓰면 안 된다.
   // 사람이 읽는 로그·오류 메시지에 같은 낱말이 들어가는 것은 무방하므로,
@@ -131,22 +133,49 @@ check("Provider에 하드코딩된 사이트 문구·선택자가 없다", () =>
     );
   }
   // 어휘는 반드시 프로필에서 와야 한다.
-  assert(/profile\.vocabulary/.test(body), "프로필 어휘를 쓰지 않는다");
+  assert(/profile\.detectors|classifyScreenText/.test(body), "프로필 어휘를 쓰지 않는다");
   // CSS 선택자도 사이트별 클래스/아이디를 쓰면 안 된다.
   assert(!/querySelector(All)?\(\s*["'`][.#]/.test(body), "사이트별 클래스/아이디 선택자가 있다");
 });
 
+check("사업자 이름을 파일명으로 먼저 정하지 않았다", () => {
+  const files = listFiles("agent").concat(listFiles("tests/agent"));
+  for (const file of files) {
+    assert(
+      !/(srail|korail|srt|ktx)/i.test(path.basename(file)),
+      `파일 이름에 사업자·열차명이 들어 있다: ${file}`,
+    );
+  }
+});
+
 check("대상 호스트가 코드가 아니라 프로필에서 온다", () => {
-  const provider = read("agent/src/providers/sr-srt-live-provider.mjs");
+  const provider = read("agent/src/providers/live-booking-provider.mjs");
   const body = provider.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   assert(!/srail|korail|letskorail/i.test(body), "대상 호스트가 코드에 박혀 있다");
   assert(/profile\.host/.test(body), "프로필의 host 를 쓰지 않는다");
 });
 
-check("확인되지 않은 프로필로는 실행되지 않는다", () => {
-  const profile = read("agent/src/profile.mjs");
-  assert(/PROVIDER_PROFILE_REQUIRED/.test(profile), "거부 코드가 없다");
-  assert(/!profile\.verified/.test(profile), "verified 검사가 없다");
+check("사용자가 손으로 켤 수 있는 verified 스위치가 없다", () => {
+  const profile = stripComments(read("agent/src/profile.mjs"));
+  const signing = stripComments(read("agent/src/profile-signing.mjs"));
+  // 프로필 내용을 고치면 깨지는 서명으로만 사용 가능해진다.
+  // 조건을 무력화한 형태(if (false && ...))까지 잡는다. 진짜 보증은
+  // tests/agent/profile-signing.test.mjs 의 변조 테스트다.
+  assert(/if \(!verifySignature\(profile\)\) \{/.test(profile), "서명 검사가 없거나 무력화됐다");
+  assert(/PROFILE_TAMPERED/.test(profile), "변조 감지 코드가 없다");
+  assert(/createHmac/.test(signing), "서명이 HMAC 이 아니다");
+  // finalizeProfile 을 거치지 않고 서명이 붙는 경로가 없어야 한다.
+  const signCallers = (profile.match(/signProfile\(/g) ?? []).length;
+  assert(signCallers === 1, `signProfile 호출이 ${signCallers}곳이다. finalizeProfile 한 곳이어야 한다`);
+  assert(/checks\.filter\(\(check\) => !check\.ok\)/.test(profile), "검증 실패 시 서명을 막지 않는다");
+  // 옛 방식의 흔적이 남아 있으면 안 된다.
+  assert(!/profile\.verified\s*=/.test(profile), "verified 를 대입하는 코드가 있다");
+});
+
+check("화면 구조가 바뀌면 중단한다", () => {
+  const provider = stripComments(read("agent/src/providers/live-booking-provider.mjs"));
+  assert(/PROFILE_FINGERPRINT_MISMATCH/.test(provider), "지문 불일치 처리가 없다");
+  assert(/checkFingerprint: true/.test(provider), "좌석을 읽을 때 지문을 확인하지 않는다");
 });
 
 // --- 4. 예약 안전장치 --------------------------------------------------------
@@ -160,8 +189,51 @@ check("읽기 전용 모드에는 예약 전이가 존재하지 않는다", () =
   assert(!/RESERVING/.test(seatFound), "읽기 전용 경로에서 RESERVING 으로 갈 수 있다");
 });
 
+check("읽기 전용 Provider는 예약을 수행할 수 없다", () => {
+  const provider = stripComments(read("agent/src/providers/live-booking-provider.mjs"));
+  const reserve = provider.split("async requestReservation")[1].split("async verifyReservation")[0];
+  assert(/allowReservation/.test(reserve), "예약 가능 여부를 보지 않는다");
+  assert(/RESERVATION_NOT_ARMED/.test(reserve), "읽기 전용에서 막는 코드가 없다");
+  // 이번 단계에서는 어떤 경우에도 클릭까지 가지 않는다.
+  assert(!/\.click\(/.test(reserve), "예약 단계에 클릭 코드가 있다");
+});
+
+check("읽기 전용 실증은 예약 가능한 Provider를 거부한다", () => {
+  const probe = stripComments(read("agent/src/readonly-probe.mjs"));
+  assert(/provider\.reservationEnabled/.test(probe), "Provider 의 예약 가능 여부를 확인하지 않는다");
+  assert(/reservationEnabled: false/.test(probe), "스냅샷에 예약 불가 표시가 없다");
+  const controller = stripComments(read("agent/src/controller.mjs"));
+  assert(/allowReservation: false/.test(controller), "컨트롤러가 읽기 전용 Provider를 만들지 않는다");
+  assert(!/allowReservation: true/.test(controller), "컨트롤러에 예약 가능 경로가 있다");
+});
+
+check("단건 조회 -> 재조회 -> 고정 주기 순서를 지킨다", () => {
+  const probe = stripComments(read("agent/src/readonly-probe.mjs"));
+  const run = probe.split("async #run()")[1].split("async #readOnce")[0];
+  const single = run.indexOf("SINGLE_READ");
+  const recheck = run.indexOf("RECHECK");
+  const polling = run.indexOf("POLLING");
+  assert(single > -1 && recheck > single && polling > recheck, "순서가 어긋난다");
+  assert(/#checkConsistency/.test(probe), "일관성 확인이 없다");
+});
+
+check("로컬 화면과 API가 같은 출처다", () => {
+  const ipc = stripComments(read("agent/src/ipc-server.mjs"));
+  assert(/consolePage\(/.test(ipc), "로컬 화면을 제공하지 않는다");
+  assert(/CROSS_ORIGIN_BLOCKED/.test(ipc), "교차 출처 차단이 없다");
+  assert(!/access-control-allow-origin/i.test(ipc), "CORS 허용 헤더를 내보낸다");
+  const page = stripComments(read("agent/src/console-page.mjs"));
+  assert(!/fetch\(\s*["'`]https?:\/\//.test(page), "로컬 화면이 외부 주소를 호출한다");
+});
+
+check("공개 배포본은 로컬 Agent를 호출하지 않는다", () => {
+  const panel = stripComments(read("components/live-agent-panel.tsx"));
+  assert(!/fetch\(/.test(panel), "배포본 패널이 fetch 를 한다");
+  assert(!/127\.0\.0\.1:\d+\/(api|ping)/.test(panel), "배포본 패널이 Agent API 주소를 부른다");
+});
+
 check("예약 클릭 직전에 펜싱 토큰을 확인한다", () => {
-  const provider = read("agent/src/providers/sr-srt-live-provider.mjs");
+  const provider = read("agent/src/providers/live-booking-provider.mjs");
   const reserve = provider.split("async requestReservation")[1].split("async verifyReservation")[0];
   assert(/lock\.assertFencingToken\(\)/.test(reserve), "펜싱 토큰 확인이 없다");
 });
@@ -197,11 +269,10 @@ check("예약이 확인되면 나머지 후보를 중단한다", () => {
   );
 });
 
-check("결제기한은 화면에서 읽은 값만 쓴다", () => {
-  const provider = read("agent/src/providers/sr-srt-live-provider.mjs");
+check("결제기한을 추정하지 않는다", () => {
+  const provider = read("agent/src/providers/live-booking-provider.mjs");
   const deadline = provider.split("async readPaymentDeadline")[1].split("async stop")[0];
-  assert(/found:\s*false/.test(deadline), "읽지 못했을 때 found:false 를 돌려주지 않는다");
-  // 10분 같은 기본 기한을 만들어내면 안 된다.
+  assert(/found:\s*false/.test(deadline), "읽기 전용 단계에서 기한을 읽는다고 표시한다");
   assert(!/10\s*\*\s*60|600000|addMinutes/.test(deadline), "결제기한을 만들어내는 코드가 있다");
 });
 
@@ -248,7 +319,7 @@ check("모든 로그가 마스킹을 거친다", () => {
 check("DOM 원문을 기록하지 않는다", () => {
   assert(!/innerHTML|outerHTML/.test(read("agent/src/runner.mjs")), "runner 가 HTML 을 다룬다");
   assert(!/log\.[a-z]+\([^)]*innerHTML/.test(agentCode), "HTML 을 로그에 남긴다");
-  const provider = read("agent/src/providers/sr-srt-live-provider.mjs");
+  const provider = read("agent/src/providers/live-booking-provider.mjs");
   assert(/safeScreenText/.test(provider), "화면 문구 길이 제한을 쓰지 않는다");
 });
 
@@ -264,8 +335,8 @@ check("실제 Provider 이름이 Mock 과 구분된다", () => {
   const contract = read("agent/src/providers/provider-contract.mjs");
   assert(/startsWith\("live:"\)/.test(contract), "live: 접두사 검사가 없다");
   assert(/simulation !== false/.test(contract), "simulation=false 검사가 없다");
-  const provider = read("agent/src/providers/sr-srt-live-provider.mjs");
-  assert(/name:\s*`live:SR-SRT@/.test(provider), "Provider 이름에 사업자가 없다");
+  const provider = read("agent/src/providers/live-booking-provider.mjs");
+  assert(/name:\s*`live:\$\{profile\.operator/.test(provider), "Provider 이름이 프로필의 사업자에서 오지 않는다");
   assert(/simulation:\s*false/.test(provider), "simulation:false 가 없다");
 });
 
@@ -275,12 +346,21 @@ check("Agent 가 시뮬레이터 코드를 가져다 쓰지 않는다", () => {
   }
 });
 
-check("웹 UI 가 실제 상태와 시연을 구분해 표시한다", () => {
+check("웹 UI 가 실제 연동을 시연과 구분해 표시한다", () => {
   const panel = read("components/live-agent-panel.tsx");
   assert(/시뮬레이터 아님/.test(panel), "실제 연동임을 표시하지 않는다");
-  assert(/직접 결제/.test(panel), "직접 결제 안내가 없다");
-  assert(/화면에서 확인하지 못했습니다/.test(panel), "결제기한 미확인 표시가 없다");
-  assert(!/자동 결제|결제 진행/.test(panel), "결제를 진행하는 문구가 있다");
+  assert(/읽기 전용/.test(panel), "읽기 전용임을 표시하지 않는다");
+  assert(/절전/.test(panel), "PC 절전 시 멈춘다는 안내가 없다");
+  // 이번 단계에서 하지 않는 것을 성과처럼 적지 않는다.
+  assert(!/예약 성공|결제기한|자동 결제/.test(panel), "아직 하지 않는 동작을 표시한다");
+});
+
+check("로컬 화면이 예약·결제를 다루지 않는다", () => {
+  const page = read("agent/src/console-page.mjs");
+  assert(/읽기 전용/.test(page), "읽기 전용임을 표시하지 않는다");
+  assert(/예약 버튼을 누르지 않습니다/.test(page), "예약하지 않는다는 안내가 없다");
+  assert(!/결제하기|카드번호|예약 성공/.test(page), "결제·예약 성공 문구가 있다");
+  assert(!/type="password"/.test(page), "비밀번호 입력칸이 있다");
 });
 
 // --- 결과 -------------------------------------------------------------------

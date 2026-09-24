@@ -611,24 +611,7 @@ export default function Home() {
                     onClearPrefill={clearCandidates}
                   />
                   <div className="mx-auto max-w-3xl border-t border-white/10 pt-6">
-                    <LiveAgentPanel
-                      prefill={
-                        selectedCandidates.length > 0
-                          ? {
-                              departure: selectedCandidates[0].departure,
-                              arrival: selectedCandidates[0].arrival,
-                              date: selectedCandidates[0].date,
-                              passengers,
-                              candidates: selectedCandidates.map((candidate) => ({
-                                id: candidate.id,
-                                trainNumber: candidate.number,
-                                departAt: candidate.depart,
-                                arriveAt: candidate.arrive,
-                              })),
-                            }
-                          : null
-                      }
-                    />
+                    <LiveAgentPanel />
                   </div>
                   <div className="mx-auto max-w-3xl border-t border-white/10 pt-6">
                     <AutomationJobsPanel user={authUser} />

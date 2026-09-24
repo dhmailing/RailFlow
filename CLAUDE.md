@@ -16,7 +16,7 @@
 - TAGO 실제 시간표 provider 구현. 새 Secret으로 실조회 검증 필요. 좌석 잔여·예약·결제 미구현
 - 데모 열차는 `lib/rail/mock-provider.ts`, 데모 예약 상태는 localStorage에 있음
 - v0.3 변경사항·검증과 배포 조건은 `docs/V0.3-validation.md` 참조
-- v0.8에서 실제 좌석 조회·예약용 Local Automation Agent를 `agent/`에 추가. 실제 사이트 검증은 아직 하지 않음. `docs/V0.8-LIVE-BOOKING-AGENT.md` 참조
+- v0.8에서 실제 좌석 조회용 Local Automation Agent를 `agent/`에 추가. 사용자 PC에서 실행하며 로컬 화면(`http://127.0.0.1:4319/`)을 Agent가 직접 제공한다. 현재 읽기 전용만 가능하고 실제 사이트 검증은 아직 하지 않음. `docs/V0.8-LIVE-BOOKING-AGENT.md`, `docs/V0.8-LOCAL-CONNECTION.md` 참조
 - 검정 `#070707`, 주황 `#FF8A1F` 디자인
 
 ## 개발 원칙
@@ -70,3 +70,4 @@ CAPTCHA 해결·우회, 대기열 우회, 봇 탐지 회피, User-Agent·IP·계
 - 공식 화면에 접근하지 못했으면 선택자·화면 문구를 추측해서 쓰지 않는다. 프로필로 분리해 사용자의 PC에서 실제 화면으로 채우게 한다.
 - 가짜 Provider를 쓴 자동 테스트 통과를 실제 사이트 연동 검증으로 보고하지 않는다.
 - 지침 충돌을 기술적 불가능이나 외부 서비스의 확정된 금지로 바꿔 보고하지 않는다.
+

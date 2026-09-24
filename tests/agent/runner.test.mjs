@@ -18,7 +18,7 @@ process.env.RAILFLOW_AGENT_QUIET = "1";
 const { JobRunner } = await import("../../agent/src/runner.mjs");
 const { AgentLock } = await import("../../agent/src/lock.mjs");
 const { JobState, RunMode } = await import("../../agent/src/status.mjs");
-const { ProviderHalt } = await import("../../agent/src/providers/sr-srt-live-provider.mjs");
+const { ProviderHalt } = await import("../../agent/src/providers/provider-halt.mjs");
 const { closeLog } = await import("../../agent/src/log.mjs");
 
 // 로그 파일 스트림이 열려 있으면 테스트 프로세스가 끝나지 않는다.
