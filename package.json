@@ -13,7 +13,9 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "vercel-build": "next build",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:autobook": "node --test --test-timeout=20000 tests/autobook/*.test.mjs",
+    "verify:autobook": "node scripts/verify-autobook.cjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

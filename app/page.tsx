@@ -61,6 +61,8 @@ const stations: string[] = [...stationNames];
 const SettingsView = dynamic(()=>import("@/components/rail-settings"),{loading:()=> <p role="status">설정 불러오는 중</p>});
 const AuthPanel = dynamic(()=>import("@/components/auth-panel"),{loading:()=> <p role="status">로그인 상태 불러오는 중</p>});
 const WatchJobsPanel = dynamic(()=>import("@/components/watch-jobs"),{loading:()=> <p role="status">취소표 감시 상태 불러오는 중</p>});
+// v0.9 서버형 자동예약. 지금은 "무엇이 준비됐고 무엇이 없는지"만 보여준다.
+const AutobookPanel = dynamic(()=>import("@/components/autobook-panel"),{loading:()=> <p role="status">자동예약 상태 불러오는 중</p>});
 const AutomationJobsPanel = dynamic(()=>import("@/components/automation/automation-jobs"),{loading:()=> <p role="status">자동화 작업 상태 불러오는 중</p>});
 
 function kstDate(offsetDays: number) {
@@ -607,6 +609,9 @@ export default function Home() {
                     }
                     onClearPrefill={clearCandidates}
                   />
+                  <div className="mx-auto max-w-3xl border-t border-white/10 pt-6">
+                    <AutobookPanel />
+                  </div>
                   <div className="mx-auto max-w-3xl border-t border-white/10 pt-6">
                     <AutomationJobsPanel user={authUser} />
                   </div>
