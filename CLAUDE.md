@@ -12,6 +12,8 @@
 - TAGO 실제 시간표 provider 구현. 새 Secret으로 실조회 검증 필요. 좌석 잔여·예약·결제 미구현
 - 데모 열차는 `lib/rail/mock-provider.ts`, 데모 예약 상태는 localStorage에 있음
 - v0.3 변경사항·검증과 배포 조건은 `docs/V0.3-validation.md` 참조
+- 브라우저 자동화로 공식 예매 화면을 조작하는 방식은 **폐기했다.** 실제 접속이 자동화된 요청으로 판정돼 접속이 제한됐고, 탐지 회피로 되살리지 않는다. 결정 경위는 `docs/adr/0003-abandon-browser-agent.md` 참조. 관련 제품 코드는 저장소에 두지 않는다
+- v0.9에서 서버형 자동예약 기반을 `lib/autobook/`에 추가. 상태 기계·분산 락·펜싱 토큰·멱등키·Outbox·rate limit·강제 중단 스위치 구현. **실제 좌석 조회·예약 Provider는 Stub**(공개·승인된 연동 명세를 확보하지 못함). 운영 기본값은 `unavailable`. `docs/V0.9-SERVER-RESERVATION.md`, `docs/V0.9-KORAIL-INTEGRATION-RESEARCH.md` 참조
 - 검정 `#070707`, 주황 `#FF8A1F` 디자인
 
 ## 개발 원칙
@@ -34,3 +36,29 @@
 5. 기존 예매/자동예약/마이페이지 UX와 PWA 동작을 유지한다.
 6. 노출된 키 재사용 금지. 채팅으로 새 키를 요구하지 않는다. 서버 Secret에만 등록한다.
 7. 실제 조회·Safari 검증 전 공개 배포본을 교체하지 않는다.
+
+## 실제 연동에 대한 원칙 (v0.9)
+
+기존 목표 4번("좌석 잔여·예약 기능은 공식·승인된 연동 방식이 확인된 뒤 별도 구현한다")은 **그대로 유효하다.**
+
+### 하지 않는 것
+
+CAPTCHA 해결·우회, 대기열 우회, 봇 탐지 회피, User-Agent·IP·계정·세션 로테이션, 프록시를 통한 차단 회피, 탐지 회피용 요청 간격 무작위화, 비공개 API 추측·복제, 앱 트래픽 가로채기, 차단 응답을 성공으로 위장, 결제 자동화, 카드정보·비밀번호·OTP 저장.
+
+**공식 예매 화면을 브라우저로 조작하는 방식도 여기에 포함된다**(`docs/adr/0003-abandon-browser-agent.md`). 이 목록은 `scripts/verify-autobook.cjs`로 코드에서 강제한다.
+
+### 보고 규칙
+
+- 검색 결과 요약과 공식 원문 확인을 구분한다. 원문을 대조하지 못했으면 `잠정 정보` 또는 `원문 확인 필요`로 적는다.
+- Mock Provider를 쓴 자동 테스트 통과를 실제 연동 성공으로 보고하지 않는다.
+- 지침 충돌을 기술적 불가능이나 외부 서비스의 확정된 금지로 바꿔 보고하지 않는다.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
