@@ -66,8 +66,16 @@ export function consolePage({ token, port }) {
   <h1>RailFlow 실제 연동 <span class="badge warn">로컬 전용</span></h1>
   <p class="sub">이 화면은 이 PC에서만 열립니다(127.0.0.1:${port}). 공식 예매 화면 조회는 이 PC 안에서만 이루어지고, 아이디·비밀번호·결제정보는 입력받지 않습니다.</p>
 
-  <section id="sec-profile">
-    <h2>1. 공식 화면 연결</h2>
+  <section id="sec-blocked" style="border-color:rgba(255,95,87,.45);background:#140d0d">
+    <h2 style="color:var(--danger)">실사이트 브라우저 자동화는 중단됐습니다</h2>
+    <p class="msg" id="blocked-summary" style="margin-top:0"></p>
+    <p class="note">아래 항목은 더 이상 동작하지 않습니다: <span id="blocked-list"></span></p>
+    <p class="note">계속 동작하는 것: <span id="blocked-keeps"></span></p>
+    <p class="note">자세한 경위: <code id="blocked-doc"></code></p>
+  </section>
+
+  <section id="sec-profile" style="opacity:.45">
+    <h2>1. 공식 화면 연결 <span class="badge bad">중단됨</span></h2>
     <div id="profile-list"></div>
     <div class="row" style="margin-top:10px">
       <div style="flex:3 1 260px">
@@ -76,7 +84,7 @@ export function consolePage({ token, port }) {
       </div>
     </div>
     <div class="actions">
-      <button class="primary" id="btn-capture-start">공식 화면 열기</button>
+      <button class="primary" id="btn-capture-start" disabled>공식 화면 열기 (중단됨)</button>
       <button id="btn-capture-cancel" class="hide">연결 중단</button>
     </div>
 
@@ -94,9 +102,9 @@ export function consolePage({ token, port }) {
     </div>
   </section>
 
-  <section class="live" id="sec-probe">
-    <h2>2. 읽기 전용 좌석 조회 <span class="badge bad">실제 사이트</span></h2>
-    <p class="note" style="margin-top:0">이 단계에서는 <strong>예약 버튼을 누르지 않습니다.</strong> 실제 좌석 상태를 읽어 이 화면에 그대로 표시하기만 합니다.</p>
+  <section class="live" id="sec-probe" style="opacity:.45">
+    <h2>2. 읽기 전용 좌석 조회 <span class="badge bad">중단됨</span></h2>
+    <p class="note" style="margin-top:0">공식 예매 화면 조회는 중단됐습니다. <strong>예약 버튼을 누르지 않습니다.</strong> 이 영역은 기록용으로만 남아 있으며 시작할 수 없습니다.</p>
     <div class="row">
       <div><label for="dep">출발역</label><input id="dep" value="동탄"></div>
       <div><label for="arr">도착역</label><input id="arr" value="울산(통도사)"></div>
@@ -116,7 +124,7 @@ export function consolePage({ token, port }) {
       </select></div>
     </div>
     <div class="actions">
-      <button class="primary" id="btn-probe-start">읽기 전용 조회 시작</button>
+      <button class="primary" id="btn-probe-start" disabled>읽기 전용 조회 시작 (중단됨)</button>
       <button id="btn-probe-login" class="hide">로그인 완료</button>
       <button id="btn-probe-stop" class="hide">중단</button>
     </div>
@@ -297,9 +305,18 @@ function renderProbe(probe) {
 }
 
 // --- 전체 갱신 -------------------------------------------------------------
+function renderBlocked(info) {
+  if (!info) return;
+  $("blocked-summary").textContent = info.summary || "";
+  $("blocked-list").textContent = (info.whatIsBlocked || []).join(" · ");
+  $("blocked-keeps").textContent = (info.whatStillWorks || []).join(" · ");
+  $("blocked-doc").textContent = info.document || "";
+}
+
 async function refresh() {
   try {
     const state = await api("/api/state");
+    renderBlocked(state.liveAutomation);
     renderProfiles(state.profiles || []);
     renderCapture(state.capture);
     renderProbe(state.probe);
@@ -351,7 +368,8 @@ $("btn-copy").onclick = async () => {
 
 $("date").valueAsDate = new Date(Date.now() + 7 * 86400000);
 refresh();
-setInterval(refresh, 2000);
+// 진행 중인 작업이 있을 수 없으므로 자주 갱신할 이유가 없다.
+setInterval(refresh, 10000);
 </script>
 </body>
 </html>`;

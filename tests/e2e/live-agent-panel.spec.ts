@@ -15,14 +15,14 @@ async function openAutomationTab(page: import("@playwright/test").Page) {
   await page.getByTestId("live-agent-panel").waitFor();
 }
 
-test("공개 배포본은 PC에서 실행하는 방법만 안내한다 -- 자동예약 탭", async ({ page }) => {
+test("공개 배포본은 실사이트 자동화 중단 사실을 표시한다 -- 자동예약 탭", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openAutomationTab(page);
 
   await expect(page.getByText("실제 좌석 조회 · PC에서 실행합니다")).toBeVisible();
-  await expect(page.getByText(/2-RailFlow실행\.cmd/)).toBeVisible();
-  // 화면을 꺼도 도는 서버 감시로 설명하지 않는다.
-  await expect(page.getByText(/Agent 창을 닫거나 PC가 절전에 들어가면 조회가 멈춥니다/)).toBeVisible();
+  // 실사이트 자동화가 중단됐다는 사실을 숨기지 않는다.
+  await expect(page.getByText(/중단됐습니다/)).toBeVisible();
+  await expect(page.getByText(/V0\.8-LIVE-AUTOMATION-POSTMORTEM/)).toBeVisible();
 });
 
 test("공개 배포본은 로컬 Agent에 요청을 보내지 않는다", async ({ page }) => {

@@ -13,7 +13,7 @@
 
 import process from "node:process";
 import { spawn } from "node:child_process";
-import { resolveConfig, DEFAULT_AGENT_PORT, MIN_LIVE_POLLING_INTERVAL_SECONDS } from "./src/config.mjs";
+import { resolveConfig, DEFAULT_AGENT_PORT } from "./src/config.mjs";
 import { log, closeLog, logFilePath } from "./src/log.mjs";
 import { AgentLock } from "./src/lock.mjs";
 import { listProfiles } from "./src/profile.mjs";
@@ -28,24 +28,6 @@ function parseArgs(argv) {
     else args._.push(token);
   }
   return args;
-}
-
-async function loadPlaywright() {
-  try {
-    return await import("playwright");
-  } catch (error) {
-    console.error(
-      [
-        "",
-        "브라우저 자동화 도구(playwright)를 불러오지 못했습니다.",
-        '"1-설치.cmd" 를 한 번 실행해 주세요.',
-        "",
-        `자세한 원인: ${error.message}`,
-        "",
-      ].join("\n"),
-    );
-    process.exit(2);
-  }
 }
 
 /**
@@ -79,20 +61,11 @@ function cmdDoctor() {
   const major = Number(process.versions.node.split(".")[0]);
   if (major < 20) problems.push(`Node.js 버전이 낮습니다(${process.version}). 20 이상이 필요합니다.`);
 
-  let playwrightOk = true;
-  try {
-    // 모듈 해석만 확인한다. 브라우저를 띄우지 않는다.
-    import.meta.resolve("playwright");
-  } catch {
-    playwrightOk = false;
-    problems.push('playwright 가 설치되지 않았습니다. "1-설치.cmd" 를 실행해 주세요.');
-  }
-
   const profiles = listProfiles();
   console.log("");
   console.log("== RailFlow Agent 점검 ==");
   console.log(`  Node.js        : ${process.version}`);
-  console.log(`  playwright     : ${playwrightOk ? "확인됨" : "없음"}`);
+  console.log("  실사이트 자동화: 중단됨 (DEPRECATED_BLOCKED)");
   console.log(`  저장된 프로필  : ${profiles.length}개`);
   for (const profile of profiles) {
     console.log(`    - ${profile.host} : ${profile.usable ? "사용 가능" : `사용 불가 (${profile.problem})`}`);
@@ -114,7 +87,8 @@ async function cmdStart(args) {
   const config = resolveConfig({ port: args.port, livePollingIntervalSeconds: args.interval });
   for (const warning of config.warnings) console.warn(`안내: ${warning}`);
 
-  const playwright = await loadPlaywright();
+  // 실사이트 자동화가 막혀 있으므로 이제 playwright 를 불러올 이유가 없다.
+  // 설치돼 있지 않아도 Agent는 상태·진단 화면으로 정상 동작한다.
   const lock = new AgentLock();
   try {
     lock.acquire();
@@ -127,7 +101,7 @@ async function cmdStart(args) {
   }
   lock.startHeartbeat(30_000, (error) => log.error("잠금을 잃었습니다.", { error }));
 
-  const controller = new Controller({ playwright, lock, config });
+  const controller = new Controller({ config });
   const ipc = await startIpcServer({ port: config.port, controller });
 
   const profiles = listProfiles();
@@ -139,9 +113,10 @@ async function cmdStart(args) {
       `  이 창은 닫지 마세요. 닫으면 조회가 멈춥니다.`,
       "",
       `  화면 주소   : ${ipc.consoleUrl}`,
-      `  조회 주기   : ${config.livePollingIntervalSeconds}초 고정 (하한 ${MIN_LIVE_POLLING_INTERVAL_SECONDS}초)`,
-      `  모드        : 읽기 전용 -- 예약 버튼은 누르지 않습니다.`,
-      `  프로필      : ${profiles.length === 0 ? "없음 (화면에서 '공식 화면 열기' 부터 진행)" : profiles.map((p) => `${p.host}${p.usable ? "" : " (사용 불가)"}`).join(", ")}`,
+      `  상태        : 실사이트 브라우저 자동화 중단됨 (DEPRECATED_BLOCKED)`,
+      `                공식 예매 화면 접속·좌석 조회를 수행하지 않습니다.`,
+      `                자세한 내용: docs/V0.8-LIVE-AUTOMATION-POSTMORTEM.md`,
+      `  프로필      : ${profiles.length === 0 ? "없음" : `${profiles.length}개 (조회에 사용되지 않음)`}`,
       `  로그 파일   : ${logFilePath()}`,
       "",
       "  잠시 뒤 브라우저가 자동으로 열립니다. 열리지 않으면 위 주소를 직접 입력하세요.",

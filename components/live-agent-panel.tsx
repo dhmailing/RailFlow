@@ -46,15 +46,15 @@ export default function LiveAgentPanel() {
         </div>
 
         <p className="text-sm leading-6 text-white/60">
-          실제 공식 예매 화면의 좌석 상태는 사용자의 Windows PC에서 실행되는 RailFlow Agent가 읽습니다. 이 웹
-          화면은 설치 방법을 알려주는 역할만 합니다 — 브라우저 보안 정책상 웹 페이지가 PC 안의 프로그램을 직접
-          부를 수 없기 때문입니다.
+          공식 예매 화면을 브라우저로 직접 조작하던 방식은 <strong className="text-red-300">중단됐습니다.</strong>{" "}
+          운영자가 이를 자동화된 요청으로 판정해 접속을 제한했고, 탐지를 피해 되살리지 않기로 했습니다. 지금은
+          허용된 연동 경로로 다시 설계하는 중입니다.
         </p>
 
-        <div className="space-y-2 rounded-2xl border border-white/10 bg-black/25 p-3">
+        <div className="space-y-2 rounded-2xl border border-white/10 bg-black/25 p-3 opacity-60">
           <p className="flex items-start gap-2 text-sm font-bold text-white/80">
             <MonitorSmartphone className="mt-0.5 size-4 shrink-0" />
-            PC에서 할 일
+            PC Agent (실사이트 조회 중단됨 · 상태·진단 전용)
           </p>
           <ol className="list-decimal space-y-1 pl-5 text-sm leading-6 text-white/55">
             <li>
@@ -87,14 +87,15 @@ export default function LiveAgentPanel() {
             지금 단계에서 하지 않는 것
           </p>
           <ul className="list-disc space-y-1 pl-5 text-sm leading-6 text-white/55">
-            <li>예약 버튼 클릭 · 구매 · 결제 (읽기 전용입니다)</li>
-            <li>아이디·비밀번호·OTP 입력 또는 저장 (로그인은 직접 하십니다)</li>
-            <li>쿠키·세션을 파일로 내보내기</li>
+            <li>공식 예매 화면 접속 · 좌석 조회 (2026-09 중단)</li>
+            <li>예약 버튼 클릭 · 구매 · 결제</li>
+            <li>아이디·비밀번호·OTP 입력 또는 저장</li>
+            <li>자동화 탐지 회피 · 지문 위장 · 프록시·IP 순환</li>
           </ul>
         </div>
 
         <p className="text-xs leading-5 text-white/35">
-          Agent 창을 닫거나 PC가 절전에 들어가면 조회가 멈춥니다. 화면을 꺼도 계속 도는 서버 감시가 아닙니다.
+          경위와 재시도 금지 범위: <code>docs/V0.8-LIVE-AUTOMATION-POSTMORTEM.md</code>
         </p>
       </CardContent>
     </Card>

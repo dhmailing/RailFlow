@@ -15,6 +15,7 @@ import { overlayScript, REMOVE_OVERLAY, READ_STRUCTURE, READ_ROWS_BY_PROFILE } f
 import { computeFingerprint } from "./profile-signing.mjs";
 import { emptyProfile, finalizeProfile, saveProfile, ProfileError } from "./profile.mjs";
 import { normalizeTime, normalizeTrainNumber } from "./match.mjs";
+import { assertLiveAutomationAllowed } from "./deprecation.mjs";
 
 /** 마법사 단계. 로컬 화면이 이 순서대로 안내한다. */
 export const CAPTURE_STEPS = Object.freeze([
@@ -120,6 +121,8 @@ export class CaptureSession {
 
   /** 1단계: 브라우저를 열고 사용자가 로그인할 때까지 기다린다. */
   async open(startUrl) {
+    // 2026-09 중단(docs/V0.8-LIVE-AUTOMATION-POSTMORTEM.md).
+    assertLiveAutomationAllowed("공식 화면 연결(프로필 캡처)");
     const parsed = new URL(startUrl);
     if (parsed.protocol !== "https:") throw new Error("https 주소만 사용할 수 있습니다.");
 

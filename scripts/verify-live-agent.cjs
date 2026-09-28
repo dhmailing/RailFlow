@@ -202,11 +202,15 @@ check("읽기 전용 실증은 예약 가능한 Provider를 거부한다", () =>
   const probe = stripComments(read("agent/src/readonly-probe.mjs"));
   assert(/provider\.reservationEnabled/.test(probe), "Provider 의 예약 가능 여부를 확인하지 않는다");
   assert(/reservationEnabled: false/.test(probe), "스냅샷에 예약 불가 표시가 없다");
+  // 실사이트 차단 이후 컨트롤러는 Provider를 아예 만들지 않는다. 그게
+  // "읽기 전용 Provider만 만든다"보다 강한 보장이다.
   const controller = stripComments(read("agent/src/controller.mjs"));
-  assert(/allowReservation: false/.test(controller), "컨트롤러가 읽기 전용 Provider를 만들지 않는다");
+  assert(!/createLiveBookingProvider/.test(controller), "컨트롤러가 실사이트 Provider를 만든다");
   assert(!/allowReservation: true/.test(controller), "컨트롤러에 예약 가능 경로가 있다");
 });
 
+// ReadOnlyProbe 는 지금 호출되지 않지만(실사이트 차단), 규칙 자체는
+// 서버형 구조로 옮겨갈 때 그대로 쓰이므로 검사를 유지한다.
 check("단건 조회 -> 재조회 -> 고정 주기 순서를 지킨다", () => {
   const probe = stripComments(read("agent/src/readonly-probe.mjs"));
   const run = probe.split("async #run()")[1].split("async #readOnce")[0];
@@ -361,6 +365,56 @@ check("로컬 화면이 예약·결제를 다루지 않는다", () => {
   assert(/예약 버튼을 누르지 않습니다/.test(page), "예약하지 않는다는 안내가 없다");
   assert(!/결제하기|카드번호|예약 성공/.test(page), "결제·예약 성공 문구가 있다");
   assert(!/type="password"/.test(page), "비밀번호 입력칸이 있다");
+});
+
+// --- 8. 실사이트 자동화 차단(DEPRECATED_BLOCKED) --------------------------
+check("실사이트 자동화가 코드로 차단돼 있다", () => {
+  const dep = stripComments(read("agent/src/deprecation.mjs"));
+  assert(/LIVE_AUTOMATION_STATUS = "DEPRECATED_BLOCKED"/.test(dep), "차단 상태 상수가 없다");
+  // 환경변수로 되살릴 수 있으면 안 된다.
+  assert(!/process\.env/.test(dep), "차단 스위치가 환경변수를 읽는다");
+  assert(/throw new LiveAutomationBlockedError/.test(dep), "항상 던지지 않는다");
+});
+
+check("실사이트로 나가는 입구가 전부 막혀 있다", () => {
+  const provider = stripComments(read("agent/src/providers/live-booking-provider.mjs"));
+  const open = provider.split("async openBookingSite()")[1].split("},")[0];
+  assert(/assertLiveAutomationAllowed/.test(open), "Provider 진입점이 막히지 않았다");
+  // 차단이 브라우저 실행보다 먼저여야 한다.
+  assert(
+    open.indexOf("assertLiveAutomationAllowed") < open.indexOf("launchPersistentContext"),
+    "브라우저를 먼저 띄운 뒤에 막는다",
+  );
+
+  const capture = stripComments(read("agent/src/capture.mjs"));
+  const captureOpen = capture.split("async open(startUrl)")[1].split("this.#emit();")[0];
+  assert(/assertLiveAutomationAllowed/.test(captureOpen), "캡처 진입점이 막히지 않았다");
+
+  const controller = stripComments(read("agent/src/controller.mjs"));
+  assert(/BLOCKED_ROUTES/.test(controller), "차단 라우트 목록이 없다");
+  for (const route of ["/api/capture/start", "/api/probe/start", "/api/probe/login"]) {
+    assert(controller.includes(route), `${route} 가 차단 목록에 없다`);
+  }
+  // 되살릴 수 있는 구현이 남아 있으면 안 된다.
+  assert(!/#probeStart|#captureStart/.test(controller), "실사이트 구현이 컨트롤러에 남아 있다");
+});
+
+check("차단 기록 문서가 있다", () => {
+  const doc = read("docs/V0.8-LIVE-AUTOMATION-POSTMORTEM.md");
+  for (const heading of ["실패 원인", "중단 결정", "재시도 금지 범위", "남겨둔 것"]) {
+    assert(doc.includes(heading), `문서에 "${heading}" 항목이 없다`);
+  }
+});
+
+check("차단 화면·식별 정보를 저장소에 넣지 않았다", () => {
+  for (const dir of ["agent", "docs"]) {
+    for (const file of listFiles(dir)) {
+      if (!/\.(mjs|cjs|ts|tsx|md|json)$/.test(file)) continue;
+      const text = read(file);
+      assert(!/Request\s*ID\s*[:=]\s*[A-Za-z0-9-]{8,}/i.test(text), `식별 정보로 보이는 값: ${file}`);
+      assert(!/Ray\s*ID\s*[:=]\s*[a-f0-9]{12,}/i.test(text), `식별 정보로 보이는 값: ${file}`);
+    }
+  }
 });
 
 // --- 결과 -------------------------------------------------------------------

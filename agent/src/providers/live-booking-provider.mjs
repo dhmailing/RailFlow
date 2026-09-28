@@ -19,6 +19,7 @@ import { READ_STRUCTURE, READ_ROWS_BY_PROFILE } from "../overlay.mjs";
 import { SeatStatus, HaltReason } from "../status.mjs";
 import { matchCandidateRow, normalizeTime, normalizeTrainNumber } from "../match.mjs";
 import { ProviderHalt } from "./provider-halt.mjs";
+import { assertLiveAutomationAllowed, LIVE_AUTOMATION_STATUS } from "../deprecation.mjs";
 
 export { ProviderHalt };
 
@@ -148,12 +149,17 @@ export function createLiveBookingProvider({ profile, playwright, lock, allowRese
   return {
     // 이름에 대상 사업자와 호스트가 들어간다. Mock 과 절대 겹치지 않는다.
     name: `live:${profile.operator || "미확인사업자"}@${profile.host}`,
+    // 이 Provider는 더 이상 실제 경로로 쓰이지 않는다.
+    lifecycle: LIVE_AUTOMATION_STATUS,
     operator: profile.operator || "(화면에서 확인 필요)",
     host: profile.host,
     simulation: false,
     reservationEnabled: allowReservation,
 
     async openBookingSite() {
+      // 2026-09 중단(docs/V0.8-LIVE-AUTOMATION-POSTMORTEM.md).
+      // 공식 예매 화면으로 나가는 유일한 입구이므로 여기서 막는다.
+      assertLiveAutomationAllowed("공식 예매 화면 열기");
       context = await playwright.chromium.launchPersistentContext(tempBrowserProfileDir(), {
         headless: false,
         viewport: null,
