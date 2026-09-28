@@ -1,6 +1,7 @@
 import "server-only";
 
-import type { AutobookStore } from "@/lib/autobook/store";
+import { isClaimableStatus } from "@/lib/autobook/state-machine";
+import type { AutobookAuditEntry, AutobookStore } from "@/lib/autobook/store";
 import {
   AutobookError,
   TERMINAL_STATUSES,
@@ -23,6 +24,8 @@ const jobs = new Map<string, AutobookJob>();
 const notifications = new Map<string, AutobookNotification>();
 /** 작업별 마지막 발급 토큰. 단조 증가를 보장한다. */
 const lastToken = new Map<string, number>();
+/** 감사 기록. PostgreSQL 의 autobook_audit 과 같은 계약이다. */
+const audit: AutobookAuditEntry[] = [];
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -32,11 +35,15 @@ function isActive(status: AutobookJobStatus): boolean {
   return !TERMINAL_STATUSES.includes(status);
 }
 
-/** Worker가 지금 집어도 되는 작업인지. */
+/**
+ * Worker가 지금 집어도 되는 작업인지.
+ *
+ * 상태 목록은 lib/autobook/state-machine.ts 의 CLAIMABLE_STATUSES 하나를
+ * PostgreSQL 저장소와 함께 본다. 두 구현이 서로 다른 작업을 집으면
+ * "개발에서는 되는데 운영에서는 안 되는" 차이가 생긴다.
+ */
 function isClaimable(job: AutobookJob, now: string): boolean {
-  if (!isActive(job.status)) return false;
-  // 사용자의 조치를 기다리는 상태는 Worker가 건드리지 않는다.
-  if (job.status === "RESERVATION_HELD" || job.status === "PAYMENT_PENDING") return false;
+  if (!isClaimableStatus(job.status)) return false;
   if (job.nextCheckAt && job.nextCheckAt > now) return false;
   if (job.claim && job.claim.leaseExpiresAt > now) return false;
   return true;
@@ -58,6 +65,14 @@ export function createMemoryAutobookStore(): AutobookStore {
   return {
     async createJob(job) {
       if (jobs.has(job.id)) throw new AutobookError("DUPLICATE_JOB", "같은 id 의 작업이 이미 있습니다.");
+      // 예약 멱등키는 작업 하나에만 속한다. PostgreSQL 쪽에서는 UNIQUE 인덱스가
+      // 같은 일을 하며(0003_autobook_worker.sql), 두 구현이 여기서 갈라지면
+      // "개발에서는 통과한 작업이 운영에서만 거부"된다.
+      for (const existing of jobs.values()) {
+        if (existing.reservationIdempotencyKey === job.reservationIdempotencyKey) {
+          throw new AutobookError("DUPLICATE_JOB", "같은 예약 멱등키의 작업이 이미 있습니다.");
+        }
+      }
       jobs.set(job.id, clone(job));
       return clone(job);
     },
@@ -173,6 +188,14 @@ export function createMemoryAutobookStore(): AutobookStore {
     async listNotifications(jobId) {
       return [...notifications.values()].filter((item) => item.jobId === jobId).map(clone);
     },
+
+    async recordAudit(entry) {
+      audit.push(clone({ ...entry, createdAt: entry.createdAt ?? new Date().toISOString() }));
+    },
+
+    async listAudit(jobId) {
+      return audit.filter((item) => item.jobId === jobId).map(clone);
+    },
   };
 }
 
@@ -181,4 +204,5 @@ export function resetMemoryAutobookStore(): void {
   jobs.clear();
   notifications.clear();
   lastToken.clear();
+  audit.length = 0;
 }

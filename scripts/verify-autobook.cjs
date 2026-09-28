@@ -305,6 +305,177 @@ check("lib/autobook 이 Agent·live·automation 을 import 하지 않는다", ()
   }
 });
 
+// --- 5-2. v0.10 PostgreSQL 저장소와 Worker 실행 기반 ----------------------
+
+check("SQL 값이 전부 파라미터 바인딩이다", () => {
+  const source = strip(read("lib/autobook/postgres-store.ts"));
+  // 템플릿 리터럴 안에서 ${...} 로 값을 끼워 넣은 곳이 없어야 한다.
+  // 예외는 컬럼 목록 상수(JOB_COLUMNS)와 미리 정한 SET 절 조립뿐이다.
+  const allowed = new Set(["JOB_COLUMNS", "sets.join(\", \")", "[...sets, \"updated_at = NOW()\"].join(\", \")"]);
+  const interpolations = source.match(/\$\{[^}]*\}/g) ?? [];
+  for (const raw of interpolations) {
+    const inner = raw.slice(2, -1).trim();
+    if (allowed.has(inner)) continue;
+    // `$${index}` 형태(플레이스홀더 번호)와 컬럼 목록 가공은 값이 아니다.
+    if (/^index$/.test(inner)) continue;
+    if (/^JOB_COLUMNS\b/.test(inner)) continue;
+    if (/^c\.trim\(\)$/.test(inner)) continue;
+    if (/^column$/.test(inner)) continue;
+    throw new Error(`SQL 문자열에 값이 끼워 넣어졌을 수 있다: ${raw}`);
+  }
+  // 파라미터를 실제로 쓰는지도 확인한다.
+  assert(/\$1/.test(source), "바인딩 파라미터를 쓰지 않는다");
+  assert(/FOR UPDATE SKIP LOCKED/.test(source), "원자적 claim 이 없다");
+  // 파일 전체에서 토큰 문자열을 찾으면, 한 함수에서 빠져도 다른 함수가
+  // 대신 만족시켜 검사가 비어 버린다. claim 을 다루는 함수마다 따로 본다.
+  for (const fn of ["updateJob", "renewClaim", "releaseClaim"]) {
+    const body = source.split(`async ${fn}(`)[1];
+    assert(body !== undefined, `${fn} 이 없다`);
+    const statement = body.split("},")[0];
+    assert(
+      /claim_worker_id = \$2/.test(statement) && /claim_fencing_token = \$3/.test(statement),
+      `${fn} 이 fencing token 으로 쓰기를 막지 않는다`,
+    );
+  }
+});
+
+check("DB 오류 원문이 밖으로 나가지 않는다", () => {
+  const client = strip(read("lib/autobook/postgres/client.ts"));
+  const redact = client.split("export function redactDbError")[1].split("\n}")[0];
+  assert(!/error\.message|source\.message/.test(redact), "오류 원문 message 를 통과시킨다");
+  assert(/safeMessage/.test(redact), "줄인 메시지를 만들지 않는다");
+
+  const store = strip(read("lib/autobook/postgres-store.ts"));
+  assert(/toStoreError\(error\)/.test(store), "쿼리 오류를 그대로 던진다");
+});
+
+check("연결 문자열이 상태·화면·오류로 새지 않는다", () => {
+  const config = strip(read("lib/autobook/postgres/config.ts"));
+  const describe = config.split("export function describePostgresConfig")[1];
+  assert(!/connectionString/.test(describe), "상태 요약이 연결 문자열을 담는다");
+
+  const route = strip(read("app/api/autobook/status/route.ts"));
+  assert(!/connectionString|DATABASE_URL\s*\)/.test(route), "상태 API 가 연결 문자열을 담는다");
+
+  const panel = read("components/autobook-panel.tsx");
+  assert(!/connectionString/.test(panel), "화면이 연결 문자열을 담는다");
+});
+
+check("DB 설정이 없으면 memory 로 후퇴하지 않는다", () => {
+  const selector = strip(read("lib/autobook/store-selector.ts"));
+  const postgresBranch = selector.split("const config = readPostgresConfig();")[1];
+  assert(postgresBranch !== undefined, "postgres 분기가 없다");
+  assert(!/createMemoryAutobookStore/.test(postgresBranch), "설정 실패 시 memory 로 후퇴한다");
+  assert(/unavailableStore/.test(postgresBranch), "설정 실패 시 실패한 저장소를 돌려주지 않는다");
+
+  const flags = strip(read("lib/autobook/feature-flags.ts"));
+  assert(/isPostgresStoreConfigured\(\)/.test(flags), "postgres 사용 가능 여부가 설정을 보지 않는다");
+});
+
+check("Production 에서 memory 저장소가 계속 금지된다", () => {
+  const selector = strip(read("lib/autobook/store-selector.ts"));
+  assert(/isAutobookStoreUsable\(\)/.test(selector), "memory 분기가 운영 금지 판정을 보지 않는다");
+  const flags = strip(read("lib/autobook/feature-flags.ts"));
+  assert(/mode === "memory"\) return !isProduction\(\)/.test(flags), "운영에서 memory 가 허용된다");
+});
+
+check("Worker 실행 진입점이 HTTP 로 열려 있지 않다", () => {
+  const entry = read("lib/autobook/worker-entry.ts");
+  assert(/import "server-only"/.test(entry), "서버 전용 표시가 없다");
+  assert(!/NextResponse|export async function (GET|POST|PUT|PATCH|DELETE)/.test(entry), "HTTP 핸들러가 있다");
+  // 라우트 어디에서도 Worker 진입점을 부르지 않는다.
+  const walkApp = walkDir("app").filter((file) => /route\.(ts|tsx)$/.test(file));
+  for (const route of walkApp) {
+    assert(!read(route).includes("worker-entry"), `라우트가 Worker 를 실행한다: ${route}`);
+  }
+});
+
+check("Worker 가 중단 조건을 순서대로 본다", () => {
+  const entry = strip(read("lib/autobook/worker-entry.ts"));
+  const kill = entry.indexOf("isKillSwitchOn()");
+  const enabled = entry.indexOf("isAutobookEnabled()");
+  const store = entry.indexOf("resolveAutobookStore()");
+  const capability = entry.indexOf("canReadAvailability");
+  const loop = entry.indexOf("runOnce(");
+  assert(kill > -1 && kill < enabled, "kill switch 가 가장 먼저가 아니다");
+  assert(enabled < store, "기능 스위치보다 저장소를 먼저 연다");
+  assert(store < capability, "Provider 능력보다 저장소를 늦게 본다");
+  assert(capability < loop, "능력 확인 전에 작업을 진행한다");
+  assert(/getWorkerBatchSize\(\)/.test(entry), "배치 상한을 보지 않는다");
+});
+
+check("Worker 배치 상한이 5를 넘지 않는다", () => {
+  const flags = strip(read("lib/autobook/feature-flags.ts"));
+  const body = flags.split("export function getWorkerBatchSize")[1].split("\n}")[0];
+  assert(/Math\.min\([\s\S]*?,\s*5\s*\)/.test(body), "배치 상한이 5가 아니다");
+});
+
+check("Migration 이 반복 실행에 안전하다", () => {
+  const sql = read("db/postgres/migrations/0003_autobook_worker.sql");
+  const statements = sql
+    .split(";")
+    .map((part) => part.replace(/--[^\n]*/g, "").trim())
+    .filter(Boolean);
+  for (const statement of statements) {
+    const safe =
+      /^ALTER TABLE[\s\S]*ADD COLUMN IF NOT EXISTS/i.test(statement) ||
+      /^CREATE (UNIQUE )?INDEX IF NOT EXISTS/i.test(statement) ||
+      /^DROP INDEX IF EXISTS/i.test(statement);
+    assert(safe, `반복 실행에 안전하지 않은 구문이 있다: ${statement.slice(0, 60)}`);
+  }
+  // 되돌릴 수 없는 파괴적 구문이 없어야 한다.
+  assert(!/DROP TABLE|DROP COLUMN|TRUNCATE|DELETE FROM/i.test(sql), "파괴적 migration 구문이 있다");
+});
+
+check("예약·알림 멱등키가 DB 제약으로 강제된다", () => {
+  const sql = read("db/postgres/migrations/0003_autobook_worker.sql");
+  assert(/autobook_jobs_reservation_idem/.test(sql), "예약 멱등키 UNIQUE 인덱스가 없다");
+  const base = read("db/postgres/migrations/0002_autobook.sql");
+  assert(/idempotency_key\s+TEXT NOT NULL UNIQUE/.test(base), "알림 멱등키 제약이 없다");
+});
+
+check("claim 가능 상태를 두 저장소가 함께 본다", () => {
+  const machine = strip(read("lib/autobook/state-machine.ts"));
+  assert(/export const CLAIMABLE_STATUSES/.test(machine), "공유 목록이 없다");
+  const list = machine.split("CLAIMABLE_STATUSES")[1].split("]")[0];
+  assert(!/RESERVATION_CLAIMING/.test(list), "예약 요청을 보낸 작업을 다시 집는다");
+  assert(!/"DRAFT"/.test(list), "작성 중 작업을 집는다");
+
+  const memory = strip(read("lib/autobook/memory-store.ts"));
+  assert(/isClaimableStatus\(job\.status\)/.test(memory), "메모리 저장소가 공유 목록을 쓰지 않는다");
+  const postgres = strip(read("lib/autobook/postgres-store.ts"));
+  assert(/CLAIMABLE_STATUSES/.test(postgres), "PostgreSQL 저장소가 공유 목록을 쓰지 않는다");
+});
+
+check("Node 전용 드라이버를 정적으로 import 하지 않는다", () => {
+  for (const file of walkDir("lib/autobook")) {
+    const body = strip(read(file));
+    assert(!/^import\s[^\n]*from\s+["']pg["']/m.test(body), `pg 를 정적 import 한다: ${file}`);
+  }
+  const client = strip(read("lib/autobook/postgres/client.ts"));
+  assert(/await import\("pg"\)/.test(client), "드라이버를 지연 로드하지 않는다");
+  const vite = read("vite.config.ts");
+  assert(/"pg"/.test(vite), "Workers 빌드에서 pg 를 external 로 빼지 않는다");
+});
+
+check("감사 기록에 자격증명·사용자 원문이 들어가지 않는다", () => {
+  const audit = strip(read("lib/autobook/audit.ts"));
+  assert(/createHash\("sha256"\)/.test(audit), "사용자 식별자를 단방향 해시하지 않는다");
+  assert(/FORBIDDEN/.test(audit), "감사 detail 금지어 검사가 없다");
+  const entry = strip(read("lib/autobook/worker-entry.ts"));
+  assert(/auditPseudonym\(/.test(entry), "감사 기록에 가명을 쓰지 않는다");
+  assert(!/userPseudonym: job\?\.userId|userPseudonym: job\.userId/.test(entry), "사용자 식별자 원문을 기록한다");
+  assert(/safeAuditDetail\(/.test(entry), "감사 detail 을 거르지 않는다");
+});
+
+check("테스트가 운영 DB 를 가리키지 못한다", () => {
+  const harness = read("tests/autobook/pg-harness.mjs");
+  assert(/AUTOBOOK_TEST_DATABASE_URL/.test(harness), "테스트 전용 변수를 쓰지 않는다");
+  assert(!/process\.env\.DATABASE_URL/.test(harness), "테스트가 운영 연결 문자열을 읽는다");
+  const spec = read("tests/autobook/postgres-store.conformance.test.mjs");
+  assert(/skip/.test(spec), "설정이 없을 때 NOT RUN 으로 남기지 않는다");
+});
+
 // --- 6. UI ------------------------------------------------------------------
 check("화면이 공식 연동 준비 중임을 표시한다", () => {
   const panel = read("components/autobook-panel.tsx");
@@ -332,7 +503,13 @@ check("실제 작업 등록 버튼이 비활성이고 사유 세 가지를 밝�
   assert(button !== undefined, "등록 버튼이 없다");
   assert(/^[\s\S]{0,400}?\bdisabled\b/.test(button), "등록 버튼이 비활성이 아니다");
   assert(!/onClick/.test(button.split("</button>")[0]), "비활성 버튼에 동작이 붙어 있다");
-  for (const reason of ["공식 연동 Provider 없음", "영속 DB 어댑터 없음", "계정 연결 방식 없음"]) {
+  // §8 이 요구하는 최소 세 가지. DB 연결 상태는 별도 줄로 함께 표시한다.
+  for (const reason of [
+    "공식 연동 Provider 없음",
+    "계정 연결 방식 없음",
+    "Worker 운영 배포·스케줄 미설정",
+    "영속 DB 미연결",
+  ]) {
     assert(panel.includes(reason), `비활성 사유가 없다: ${reason}`);
   }
 });

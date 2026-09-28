@@ -14,8 +14,9 @@
     "db:generate": "drizzle-kit generate",
     "vercel-build": "next build",
     "test:e2e": "playwright test",
-    "test:autobook": "node --test --test-timeout=20000 tests/autobook/*.test.mjs",
-    "verify:autobook": "node scripts/verify-autobook.cjs"
+    "test:autobook": "node --test --test-timeout=30000 tests/autobook/*.test.mjs",
+    "verify:autobook": "node scripts/verify-autobook.cjs",
+    "autobook:worker:dev": "node scripts/autobook-worker-dev.cjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
@@ -31,6 +32,7 @@
     "lucide-react": "^1.31.0",
     "next": "16.3.4",
     "next-themes": "^0.4.6",
+    "pg": "^8.23.0",
     "radix-ui": "^1.6.7",
     "react": "19.2.6",
     "react-day-picker": "^10.0.1",
@@ -49,6 +51,7 @@
     "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
+    "@types/pg": "^8.23.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",

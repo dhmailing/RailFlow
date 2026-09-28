@@ -38,6 +38,18 @@ type AutobookStatus = {
     summary: string;
     methods: Array<{ method: string; available: boolean; blockedReason: string }>;
   };
+  readiness: {
+    postgresStoreImplemented: boolean;
+    postgresConfigured: boolean;
+    postgresProblem: string | null;
+    postgresConnectionChecked: boolean;
+    postgresConnected: boolean;
+    postgresConnectionProblem: string | null;
+    workerEntrypointImplemented: boolean;
+    workerScheduleConfigured: boolean;
+    officialProviderConnected: boolean;
+    liveReservationPossible: boolean;
+  };
   note: string;
 };
 
@@ -194,6 +206,60 @@ export default function AutobookPanel() {
               </ul>
             </div>
 
+            {/* v0.10: "코드가 있다" 와 "운영에서 켜져 있다" 를 한 줄씩 나눠 쓴다. */}
+            <div className="space-y-2 rounded-2xl border border-white/10 bg-black/25 p-3">
+              <p className="text-sm font-bold text-white/80">운영 준비 상태</p>
+              <p className="text-xs leading-5 text-white/40">
+                코드가 저장소에 있다는 것과 이 환경에서 켜져 있다는 것은 다릅니다. 아래는 그 둘을 나눠 적은 것입니다.
+              </p>
+              <ul data-testid="autobook-readiness-list" className="space-y-1">
+                <Ready ok={status.readiness.postgresStoreImplemented}>
+                  PostgreSQL 저장소 코드
+                  <span className="block text-xs leading-5 text-white/30">
+                    영속 저장소 어댑터가 저장소에 구현돼 있습니다.
+                  </span>
+                </Ready>
+                <Ready ok={status.readiness.postgresConfigured}>
+                  {status.readiness.postgresConfigured ? "이 환경의 DB 설정 있음" : "이 환경의 DB 설정 없음"}
+                  <span className="block text-xs leading-5 text-white/30">
+                    {status.readiness.postgresConfigured
+                      ? "연결 설정이 있습니다. 연결 문자열은 화면에 표시하지 않습니다."
+                      : "어댑터가 있어도 연결 설정이 없으면 서버형으로 동작하지 않습니다. memory 로 자동 후퇴하지 않습니다."}
+                  </span>
+                </Ready>
+                <Ready ok={status.readiness.postgresConnected}>
+                  {status.readiness.postgresConnected ? "DB 연결 확인됨" : "DB 연결 미확인"}
+                  <span className="block text-xs leading-5 text-white/30">
+                    {status.readiness.postgresConnectionChecked
+                      ? status.readiness.postgresConnected
+                        ? "연결에 성공했습니다."
+                        : "설정은 있지만 연결하지 못했습니다."
+                      : "설정이 없어 연결을 시도하지 않았습니다."}
+                  </span>
+                </Ready>
+                <Ready ok={status.readiness.workerEntrypointImplemented}>
+                  Worker 실행 코드
+                  <span className="block text-xs leading-5 text-white/30">
+                    서버 전용 실행 진입점이 구현돼 있습니다. 공개 HTTP 주소는 만들지 않았습니다.
+                  </span>
+                </Ready>
+                <Ready ok={status.readiness.workerScheduleConfigured}>
+                  {status.readiness.workerScheduleConfigured ? "Worker 스케줄 설정됨" : "Worker 운영 배포·스케줄 미설정"}
+                  <span className="block text-xs leading-5 text-white/30">
+                    {status.readiness.workerScheduleConfigured
+                      ? "Cron·Queue 가 실행 진입점을 부르도록 설정돼 있습니다."
+                      : "아직 24시간 돌고 있지 않습니다. Cron·Queue 를 배포해야 감시가 이어집니다."}
+                  </span>
+                </Ready>
+                <Ready ok={status.readiness.officialProviderConnected}>
+                  {status.readiness.officialProviderConnected ? "공식 Provider 연결됨" : "공식 Provider 미연결"}
+                  <span className="block text-xs leading-5 text-white/30">
+                    공개·승인된 좌석 조회·예약 연동 명세를 확보하지 못했습니다.
+                  </span>
+                </Ready>
+              </ul>
+            </div>
+
             {/* §7: 후보 선택은 위 검색 화면에서 가능하다. 등록은 막는다. */}
             <div className="space-y-2 rounded-2xl border border-white/10 bg-black/25 p-3">
               <p className="text-sm font-bold text-white/80">실제 감시 작업 등록</p>
@@ -207,8 +273,8 @@ export default function AutobookPanel() {
                 실제 감시 작업 등록 (비활성)
               </button>
               <p className="text-xs leading-5 text-white/40">
-                열차를 후보로 고르는 것은 위 검색 화면에서 지금도 됩니다. 아래 세 가지가 모두 갖춰지기 전까지
-                실제 작업은 등록되지 않습니다.
+                열차를 후보로 고르는 것은 위 검색 화면에서 지금도 됩니다. 아래가 모두 갖춰지기 전까지 실제 작업은
+                등록되지 않습니다.
               </p>
               <ul id="autobook-disabled-reasons" data-testid="autobook-disabled-reasons" className="space-y-1">
                 <Ready ok={status.provider.capabilities.canCreateReservation}>
@@ -217,11 +283,20 @@ export default function AutobookPanel() {
                     좌석 조회·예약을 지원하는 공개·승인된 연동 명세를 확보하지 못했습니다.
                   </span>
                 </Ready>
-                <Ready ok={status.runtime.store === "postgres"}>
-                  {status.runtime.store === "postgres" ? "영속 DB 어댑터 연결됨" : "영속 DB 어댑터 없음"}
+                <Ready ok={status.runtime.storeUsable && status.readiness.postgresConnected}>
+                  {status.runtime.storeUsable && status.readiness.postgresConnected
+                    ? "영속 DB 연결됨"
+                    : "영속 DB 미연결"}
                   <span className="block text-xs leading-5 text-white/30">
-                    현재 저장소는 <span className="font-mono">{status.runtime.store}</span> 입니다. Postgres 어댑터가
-                    없으면 서버가 여러 대일 때 감시 작업이 유지되지 않습니다.
+                    어댑터 코드는 있습니다. 현재 저장소 설정은 <span className="font-mono">{status.runtime.store}</span>
+                    {status.readiness.postgresConfigured ? " (연결 설정 있음)" : " (연결 설정 없음)"} 입니다. 연결되지
+                    않으면 서버가 여러 대일 때 감시 작업이 유지되지 않습니다.
+                  </span>
+                </Ready>
+                <Ready ok={status.readiness.workerScheduleConfigured}>
+                  {status.readiness.workerScheduleConfigured ? "Worker 스케줄 설정됨" : "Worker 운영 배포·스케줄 미설정"}
+                  <span className="block text-xs leading-5 text-white/30">
+                    실행 코드는 있지만 Cron·Queue 가 배포되지 않아 주기적으로 돌지 않습니다.
                   </span>
                 </Ready>
                 <Ready ok={status.accountLink.anyAvailable}>
