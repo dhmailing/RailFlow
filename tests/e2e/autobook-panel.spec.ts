@@ -59,8 +59,28 @@ test("§7: 실제 작업 등록 버튼은 비활성이고 사유 세 가지를 �
 
   const reasons = page.getByTestId("autobook-disabled-reasons");
   await expect(reasons).toContainText("공식 연동 Provider 없음");
-  await expect(reasons).toContainText("영속 DB 어댑터 없음");
+  await expect(reasons).toContainText("영속 DB 미연결");
   await expect(reasons).toContainText("계정 연결 방식 없음");
+  await expect(reasons).toContainText("Worker 운영 배포·스케줄 미설정");
+});
+
+test("v0.10: 코드 구현과 운영 활성화를 나눠서 표시한다", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openAutomationTab(page);
+
+  const readiness = page.getByTestId("autobook-readiness-list");
+  // 코드가 있다고 말하는 줄
+  await expect(readiness).toContainText("PostgreSQL 저장소 코드");
+  await expect(readiness).toContainText("Worker 실행 코드");
+  // 아직 운영에서 켜지지 않았다고 말하는 줄
+  await expect(readiness).toContainText("이 환경의 DB 설정 없음");
+  await expect(readiness).toContainText("DB 연결 미확인");
+  await expect(readiness).toContainText("Worker 운영 배포·스케줄 미설정");
+  await expect(readiness).toContainText("공식 Provider 미연결");
+
+  // 연결 문자열이 화면에 새지 않는다.
+  const panel = await page.getByTestId("autobook-panel").innerText();
+  expect(panel).not.toMatch(/postgres(ql)?:\/\//);
 });
 
 test("상태 API 가 실제 예약 불가를 알린다", async ({ request }) => {
@@ -71,6 +91,17 @@ test("상태 API 가 실제 예약 불가를 알린다", async ({ request }) => 
   expect(body.runtime.provider).toBe("unavailable");
   expect(body.provider.capabilities.canCreateReservation).toBe(false);
   expect(body.accountLink.anyAvailable).toBe(false);
+
+  // v0.10: 코드 구현과 운영 활성화가 서로 다른 필드로 나온다.
+  expect(body.readiness.postgresStoreImplemented).toBe(true);
+  expect(body.readiness.workerEntrypointImplemented).toBe(true);
+  expect(body.readiness.postgresConfigured).toBe(false);
+  expect(body.readiness.postgresConnected).toBe(false);
+  expect(body.readiness.workerScheduleConfigured).toBe(false);
+  expect(body.readiness.officialProviderConnected).toBe(false);
+  expect(body.readiness.liveReservationPossible).toBe(false);
+  // 연결 문자열은 어떤 형태로도 응답에 없다.
+  expect(JSON.stringify(body)).not.toMatch(/postgres(ql)?:\/\//);
 });
 
 test("좁은 화면에서 카드 밖으로 넘치지 않는다", async ({ page }) => {
