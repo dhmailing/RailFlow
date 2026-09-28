@@ -67,7 +67,32 @@ export interface AutobookStore {
   markNotificationSent(input: { id: string; workerId: string; fencingToken: number }): Promise<void>;
   markNotificationFailed(input: { id: string; workerId: string; fencingToken: number }): Promise<void>;
   listNotifications(jobId: string): Promise<AutobookNotification[]>;
+
+  // --- 감사 기록 -----------------------------------------------------------
+
+  /**
+   * 무엇이 언제 일어났는지만 남긴다.
+   *
+   * 사용자 식별자는 **가명으로만** 들어온다(`userPseudonym`). 자격증명·쿠키·
+   * 토큰·예약번호 원문은 넣지 않는다. 이 기록의 목적은 "중복 예약이 났다면
+   * 어느 Worker 가 어떤 토큰으로 무엇을 했는가"를 사후에 재구성하는 것이다.
+   */
+  recordAudit(entry: AutobookAuditEntry): Promise<void>;
+  listAudit(jobId: string): Promise<AutobookAuditEntry[]>;
 }
+
+export type AutobookAuditEntry = {
+  jobId: string;
+  /** 원본 userId 를 넣지 않는다. lib/autobook/audit.ts 의 가명만 들어온다. */
+  userPseudonym: string;
+  event: string;
+  fromStatus: string | null;
+  toStatus: string | null;
+  workerId: string | null;
+  fencingToken: number | null;
+  detail: string | null;
+  createdAt?: string;
+};
 
 /** 저장소를 쓸 수 없을 때 모든 호출이 같은 방식으로 실패하게 한다. */
 export function unavailableStore(reason: string): AutobookStore {
@@ -89,5 +114,7 @@ export function unavailableStore(reason: string): AutobookStore {
     markNotificationSent: fail,
     markNotificationFailed: fail,
     listNotifications: fail,
+    recordAudit: fail,
+    listAudit: fail,
   } as unknown as AutobookStore;
 }

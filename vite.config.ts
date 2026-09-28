@@ -64,11 +64,18 @@ export default defineConfig(async () => {
       // docs/V0.7-AUTOMATION-BOUNDARY.md) -- excluding it from bundling here
       // only fixes the build; it does not make Playwright usable inside the
       // Cloudflare Workers runtime this build targets.
-      external: ["playwright", "playwright-core"],
+      // `pg` 도 같은 이유로 뺀다. Node 전용 드라이버이며 이 빌드가 겨냥하는
+      // Workers 런타임에서는 동작하지 않는다. lib/autobook/postgres/client.ts
+      // 가 **동적 import** 로만 불러오고, 기본 fail-closed 경로에서는 그 줄에
+      // 도달하지도 않는다. external 지정은 번들러가 정적 분석으로 이 경로를
+      // 끌어와 빌드를 깨뜨리지 못하게 하는 보강이다 -- 이것이 Workers 안에서
+      // PostgreSQL 을 쓸 수 있게 만들어 주지는 않는다(Worker 는 별도 Node
+      // 프로세스에서 돈다, docs/V0.10-POSTGRES-WORKER-READINESS.md).
+      external: ["playwright", "playwright-core", "pg", "pg-native"],
     },
     build: {
       rolldownOptions: {
-        external: ["playwright", "playwright-core"],
+        external: ["playwright", "playwright-core", "pg", "pg-native"],
       },
     },
     plugins: [

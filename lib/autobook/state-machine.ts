@@ -56,6 +56,34 @@ const ALWAYS_REACHABLE: readonly AutobookJobStatus[] = [
  */
 export const POST_REQUEST_STATUSES: readonly AutobookJobStatus[] = ["RESERVATION_CLAIMING"];
 
+/**
+ * Worker 가 집어도 되는 상태.
+ *
+ * 여기 없는 상태를 일부러 빼 둔 이유:
+ *  - `DRAFT` 는 아직 등록되지 않은 작성 중 작업이다.
+ *  - `RESERVATION_HELD` / `PAYMENT_PENDING` 은 사용자의 결제를 기다린다.
+ *  - **`RESERVATION_CLAIMING` 은 예약 요청이 이미 나간 상태다.** 이것을 다시
+ *    집으면 Worker 가 같은 좌석을 또 노리는 경로가 열린다. 요청 이후의
+ *    불확실성은 요청을 보낸 Worker 가 예약내역 재조회로 끝내고, 그 프로세스가
+ *    통째로 죽었다면 사람이 확인한다(docs/V0.10-POSTGRES-WORKER-READINESS.md).
+ *  - 종료 상태는 당연히 제외한다.
+ *
+ * 메모리 저장소와 PostgreSQL 저장소가 **이 목록 하나**를 함께 본다. 두 곳에
+ * 상태 문자열을 따로 적어 두면 구현이 조용히 갈라진다.
+ */
+export const CLAIMABLE_STATUSES: readonly AutobookJobStatus[] = Object.freeze([
+  "SCHEDULED",
+  "WATCHING",
+  "SEAT_FOUND",
+  "AUTH_REQUIRED",
+  "RATE_LIMITED",
+  "PROVIDER_UNAVAILABLE",
+]);
+
+export function isClaimableStatus(status: AutobookJobStatus): boolean {
+  return CLAIMABLE_STATUSES.includes(status);
+}
+
 export function isTerminal(status: AutobookJobStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
