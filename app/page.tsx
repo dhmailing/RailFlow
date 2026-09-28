@@ -64,6 +64,8 @@ const WatchJobsPanel = dynamic(()=>import("@/components/watch-jobs"),{loading:()
 // 실제 연동 패널. 사용자의 PC에서 도는 로컬 Agent와만 통신하며, 서버에서는
 // 렌더링하지 않는다(ssr:false) -- 127.0.0.1 접근은 브라우저에서만 의미가 있다.
 const LiveAgentPanel = dynamic(()=>import("@/components/live-agent-panel"),{ssr:false,loading:()=> <p role="status">실제 연동 상태 불러오는 중</p>});
+// v0.9 서버형 자동예약. 지금은 "무엇이 준비됐고 무엇이 없는지"만 보여준다.
+const AutobookPanel = dynamic(()=>import("@/components/autobook-panel"),{loading:()=> <p role="status">자동예약 상태 불러오는 중</p>});
 const AutomationJobsPanel = dynamic(()=>import("@/components/automation/automation-jobs"),{loading:()=> <p role="status">자동화 작업 상태 불러오는 중</p>});
 
 function kstDate(offsetDays: number) {
@@ -610,6 +612,9 @@ export default function Home() {
                     }
                     onClearPrefill={clearCandidates}
                   />
+                  <div className="mx-auto max-w-3xl border-t border-white/10 pt-6">
+                    <AutobookPanel />
+                  </div>
                   <div className="mx-auto max-w-3xl border-t border-white/10 pt-6">
                     <LiveAgentPanel />
                   </div>

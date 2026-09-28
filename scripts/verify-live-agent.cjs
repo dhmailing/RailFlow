@@ -353,8 +353,10 @@ check("Agent 가 시뮬레이터 코드를 가져다 쓰지 않는다", () => {
 check("웹 UI 가 실제 연동을 시연과 구분해 표시한다", () => {
   const panel = read("components/live-agent-panel.tsx");
   assert(/시뮬레이터 아님/.test(panel), "실제 연동임을 표시하지 않는다");
-  assert(/읽기 전용/.test(panel), "읽기 전용임을 표시하지 않는다");
-  assert(/절전/.test(panel), "PC 절전 시 멈춘다는 안내가 없다");
+  // 실사이트 자동화 중단(2026-09) 이후로는 "읽기 전용으로 돈다"가 아니라
+  // "중단됐다"가 표시돼야 한다.
+  assert(/중단됐습니다/.test(panel), "중단 사실을 표시하지 않는다");
+  assert(/POSTMORTEM/.test(panel), "경위 문서를 안내하지 않는다");
   // 이번 단계에서 하지 않는 것을 성과처럼 적지 않는다.
   assert(!/예약 성공|결제기한|자동 결제/.test(panel), "아직 하지 않는 동작을 표시한다");
 });

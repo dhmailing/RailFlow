@@ -17,6 +17,7 @@
 - 데모 열차는 `lib/rail/mock-provider.ts`, 데모 예약 상태는 localStorage에 있음
 - v0.3 변경사항·검증과 배포 조건은 `docs/V0.3-validation.md` 참조
 - v0.8 Local Automation Agent(`agent/`)의 **실사이트 브라우저 자동화는 2026-09 영구 중단**(`DEPRECATED_BLOCKED`). 공식 예매 화면 접속이 자동화된 요청으로 판정돼 접속이 제한됐고, 탐지 회피로 되살리지 않는다. 경위·재시도 금지 범위는 `docs/V0.8-LIVE-AUTOMATION-POSTMORTEM.md` 참조. Agent는 상태·진단 화면으로만 남아 있다
+- v0.9에서 서버형 자동예약 기반을 `lib/autobook/`에 추가. 상태 기계·분산 락·펜싱 토큰·멱등키·Outbox·rate limit·강제 중단 스위치 구현. **실제 좌석 조회·예약 Provider는 Stub**(공개·승인된 연동 명세를 확보하지 못함). 운영 기본값은 `unavailable`. `docs/V0.9-SERVER-RESERVATION.md`, `docs/V0.9-KORAIL-INTEGRATION-RESEARCH.md` 참조
 - 검정 `#070707`, 주황 `#FF8A1F` 디자인
 
 ## 개발 원칙
@@ -70,5 +71,6 @@ CAPTCHA 해결·우회, 대기열 우회, 봇 탐지 회피, User-Agent·IP·계
 - 공식 화면에 접근하지 못했으면 선택자·화면 문구를 추측해서 쓰지 않는다. 프로필로 분리해 사용자의 PC에서 실제 화면으로 채우게 한다.
 - 가짜 Provider를 쓴 자동 테스트 통과를 실제 사이트 연동 검증으로 보고하지 않는다.
 - 지침 충돌을 기술적 불가능이나 외부 서비스의 확정된 금지로 바꿔 보고하지 않는다.
+
 
 

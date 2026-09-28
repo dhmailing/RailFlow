@@ -15,7 +15,9 @@
     "vercel-build": "next build",
     "test:e2e": "playwright test",
     "test:agent": "node --test --test-timeout=20000 tests/agent/*.test.mjs",
-    "verify:live-agent": "node scripts/verify-live-agent.cjs"
+    "verify:live-agent": "node scripts/verify-live-agent.cjs",
+    "test:autobook": "node --test --test-timeout=20000 tests/autobook/*.test.mjs",
+    "verify:autobook": "node scripts/verify-autobook.cjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
