@@ -514,6 +514,55 @@ check("실제 작업 등록 버튼이 비활성이고 사유 세 가지를 밝�
   }
 });
 
+check("검색 결과 카드가 실제 열차에 좌석 상태를 단정하지 않는다", () => {
+  // TAGO 는 시간표·운임만 준다. 실제 열차 카드에 "예약 가능"·"매진" 을 쓰면
+  // 조회하지 않은 것을 조회한 것처럼 보여주는 것이다.
+  const page = read("app/page.tsx");
+  const badge = page.split("function SeatBadge(")[1];
+  assert(badge !== undefined, "SeatBadge 가 없다");
+  const body = badge.split("\nfunction ")[0];
+
+  assert(/좌석 미조회/.test(body), "실제 열차에 '좌석 미조회' 표시가 없다");
+  assert(/data-seat-state="not-checked"/.test(body), "미조회 상태를 식별할 표시가 없다");
+
+  // 데모 분기 밖(= 실제 열차 경로)에 좌석 상태 단정 문구가 없어야 한다.
+  const demoBranch = body.split('if (train.source === "demo")')[1];
+  assert(demoBranch !== undefined, "데모 분기가 없다");
+  const realPath = demoBranch.split("return (").slice(2).join("return (");
+  assert(!/"?예약 가능|매진/.test(realPath), "실제 열차 경로가 좌석 상태를 단정한다");
+});
+
+check("데모 좌석 표시가 가상값임을 드러낸다", () => {
+  const page = read("app/page.tsx");
+  const badge = page.split("function SeatBadge(")[1].split("\nfunction ")[0];
+  for (const label of ["가상 예약 가능", "가상 매진", "가상 상태 불명"]) {
+    assert(badge.includes(label), `가상 표기가 없다: ${label}`);
+  }
+  assert(/MOCK/.test(badge), "데모 좌석 표시에 MOCK 칩이 없다");
+  assert(/data-seat-state="simulated"/.test(badge), "가상 상태를 식별할 표시가 없다");
+});
+
+check("넘어온 자동예약 조건을 등록된 작업으로 보여주지 않는다", () => {
+  const panel = read("components/autobook-panel.tsx");
+  const block = panel.split('data-testid="autobook-handoff"')[1];
+  assert(block !== undefined, "넘어온 조건 블록이 없다");
+  const body = block.split("</div>\n            )}")[0];
+
+  assert(/아직 등록되지 않았습니다/.test(body), "등록되지 않았다는 표시가 없다");
+  assert(/좌석 미조회/.test(body), "좌석 미조회 표시가 없다");
+
+  // 항목 칸(<dt>)만 본다. 없는 값을 칸으로 만들어 두면 빈 칸이 실제 상태처럼
+  // 읽힌다. 산문에서 "진행 상태는 표시할 것이 없다"고 쓰는 것은 괜찮다.
+  const terms = [...body.matchAll(/<dt[^>]*>([^<]+)<\/dt>/g)].map((m) => m[1].trim());
+  assert(terms.length > 0, "조건 항목 칸이 없다");
+  for (const banned of ["조회 횟수", "실제 조회 횟수", "마지막 조회 시각", "예약번호", "결제기한", "진행 상태", "현재 상태"]) {
+    assert(!terms.includes(banned), `등록되지 않은 조건에 ${banned} 칸이 있다`);
+  }
+  for (const label of ["구간", "운행 날짜", "인원", "좌석등급", "대상 열차", "좌석 상태"]) {
+    assert(terms.includes(label), `조건 항목이 없다: ${label}`);
+  }
+});
+
 check("작업 생성 API 가 없다", () => {
   const apiDir = path.join(ROOT, "app/api/autobook");
   const routes = walkDir("app/api/autobook").filter((f) => /route\.(ts|tsx)$/.test(f));

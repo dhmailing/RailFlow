@@ -112,9 +112,31 @@ function Ready({ ok, children }: { ok: boolean; children: React.ReactNode }) {
   );
 }
 
-export default function AutobookPanel() {
+/**
+ * 검색 화면에서 [자동예약]으로 넘어온 조건.
+ *
+ * 이것은 **등록된 작업이 아니다.** 서버에 아무 것도 만들어지지 않은, 사용자가
+ * 고른 값일 뿐이다. 그래서 진행 상태·조회 횟수·예약번호를 함께 보여주지
+ * 않는다. 보여줄 값이 없고, 빈 칸은 실제 상태처럼 읽힌다.
+ */
+export type AutobookHandoff = {
+  departure: string;
+  arrival: string;
+  date: string;
+  passengers: string;
+  trains: Array<{ number: string; trainType: string; depart: string; arrive: string }>;
+};
+
+const SEAT_CLASS_LABEL: Record<string, string> = {
+  standard_only: "일반실만",
+  standard_preferred: "일반실 우선, 없으면 특실 허용",
+  any: "특실 허용",
+};
+
+export default function AutobookPanel({ handoff }: { handoff?: AutobookHandoff | null }) {
   const [status, setStatus] = useState<AutobookStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [seatClass, setSeatClass] = useState<"standard_only" | "standard_preferred" | "any">("standard_preferred");
 
   useEffect(() => {
     let alive = true;
@@ -259,6 +281,56 @@ export default function AutobookPanel() {
                 </Ready>
               </ul>
             </div>
+
+            {/* 검색 화면에서 [자동예약]으로 넘어온 조건. 등록된 작업이 아니다. */}
+            {handoff && handoff.trains.length > 0 && (
+              <div
+                data-testid="autobook-handoff"
+                className="space-y-3 rounded-2xl border border-[#ff8a1f]/30 bg-[#ff8a1f]/[0.06] p-3"
+              >
+                <p className="text-sm font-bold text-[#ffad62]">검색 화면에서 넘어온 조건</p>
+                <p className="text-xs leading-5 text-white/45">
+                  아래는 사용자가 고른 값이며 <strong className="text-white/70">아직 등록되지 않았습니다.</strong> 서버에
+                  작업이 만들어지지 않았으므로 진행 상태·실제 조회 횟수·마지막 조회 시각·예약정보는 표시할 것이
+                  없습니다.
+                </p>
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-sm leading-6">
+                  <dt className="text-white/40">구간</dt>
+                  <dd className="font-bold text-white/80">
+                    {handoff.departure} → {handoff.arrival}
+                  </dd>
+                  <dt className="text-white/40">운행 날짜</dt>
+                  <dd className="font-bold text-white/80">{handoff.date}</dd>
+                  <dt className="text-white/40">인원</dt>
+                  <dd className="font-bold text-white/80">{handoff.passengers}명</dd>
+                  <dt className="text-white/40">좌석등급</dt>
+                  <dd className="font-bold text-white/80">{SEAT_CLASS_LABEL[seatClass]}</dd>
+                  <dt className="text-white/40">대상 열차</dt>
+                  <dd className="space-y-0.5">
+                    {handoff.trains.map((train) => (
+                      <span key={`${train.number}-${train.depart}`} className="block font-bold text-white/80">
+                        {train.trainType} {train.number} · {train.depart} 출발 → {train.arrive} 도착
+                      </span>
+                    ))}
+                  </dd>
+                  <dt className="text-white/40">좌석 상태</dt>
+                  <dd className="font-bold text-white/55">좌석 미조회 — 실제 좌석을 조회한 적이 없습니다</dd>
+                </dl>
+                <label className="block text-xs font-bold text-white/50">
+                  좌석등급
+                  <select
+                    data-testid="autobook-seat-class"
+                    value={seatClass}
+                    onChange={(event) => setSeatClass(event.target.value as typeof seatClass)}
+                    className="mt-1 w-full rounded-lg border border-white/10 bg-[#111] p-2 text-sm font-normal text-white"
+                  >
+                    <option value="standard_only">일반실만</option>
+                    <option value="standard_preferred">일반실 우선, 없으면 특실 허용</option>
+                    <option value="any">특실 허용</option>
+                  </select>
+                </label>
+              </div>
+            )}
 
             {/* §7: 후보 선택은 위 검색 화면에서 가능하다. 등록은 막는다. */}
             <div className="space-y-2 rounded-2xl border border-white/10 bg-black/25 p-3">
