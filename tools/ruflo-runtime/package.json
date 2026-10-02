@@ -1,0 +1,9 @@
+{
+  "name": "ruflo-runtime",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Ruflo agent-orchestration 런타임의 로컬 핀 설치. RailFlow 제품 의존성이 아니다 — 루트 package.json 과 분리돼 있고 빌드·배포에 포함되지 않는다. 전역 npx 캐시를 쓰지 않는 이유는 docs/RUFLO-EVALUATION.md 참조(캐시 설치 손상으로 MCP 서버가 기동하지 못했다).",
+  "dependencies": {
+    "ruflo": "3.50.0"
+  }
+}

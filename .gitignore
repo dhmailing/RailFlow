@@ -58,3 +58,10 @@ next-env.d.ts
 .claude-flow/data/
 .claude-flow/logs/
 .claude-flow/sessions/
+
+# Ruflo 로컬 런타임 의존성 (tools/ruflo-runtime/package.json 으로 재설치 가능)
+tools/ruflo-runtime/node_modules/
+
+# Ruflo 런타임이 만드는 상태 파일 (T1 실행 중 확인)
+.swarm/
+ruvector.db

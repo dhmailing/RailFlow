@@ -1,0 +1,210 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__claude-flow__swarm_init",
+      "mcp__claude-flow__swarm_status",
+      "mcp__claude-flow__swarm_health",
+      "mcp__claude-flow__swarm_shutdown",
+      "mcp__claude-flow__agent_spawn",
+      "mcp__claude-flow__agent_list",
+      "mcp__claude-flow__agent_status",
+      "mcp__claude-flow__agent_health",
+      "mcp__claude-flow__agent_logs",
+      "mcp__claude-flow__agent_terminate",
+      "mcp__claude-flow__task_create",
+      "mcp__claude-flow__task_list",
+      "mcp__claude-flow__task_assign",
+      "mcp__claude-flow__task_status",
+      "mcp__claude-flow__task_update",
+      "mcp__claude-flow__task_complete",
+      "mcp__claude-flow__task_summary",
+      "mcp__claude-flow__task_cancel",
+      "mcp__claude-flow__task_retry",
+      "mcp__claude-flow__memory_store",
+      "mcp__claude-flow__memory_retrieve",
+      "mcp__claude-flow__memory_search",
+      "mcp__claude-flow__memory_list",
+      "mcp__claude-flow__memory_stats"
+    ],
+    "deny": [
+      "mcp__claude-flow__agent_execute",
+      "mcp__claude-flow__agent_pool",
+      "mcp__claude-flow__agent_update",
+      "mcp__claude-flow__agentdb_*",
+      "mcp__claude-flow__agenticow_*",
+      "mcp__claude-flow__agenticow_rollback",
+      "mcp__claude-flow__aidefence_*",
+      "mcp__claude-flow__analyze_*",
+      "mcp__claude-flow__autopilot_*",
+      "mcp__claude-flow__autopilot_enable",
+      "mcp__claude-flow__autopilot_learn",
+      "mcp__claude-flow__autopilot_predict",
+      "mcp__claude-flow__browser_*",
+      "mcp__claude-flow__browser_act",
+      "mcp__claude-flow__browser_cookie_use",
+      "mcp__claude-flow__browser_session_record",
+      "mcp__claude-flow__browser_session_replay",
+      "mcp__claude-flow__browser_template_apply",
+      "mcp__claude-flow__business_pod_*",
+      "mcp__claude-flow__claims_*",
+      "mcp__claude-flow__config_*",
+      "mcp__claude-flow__coordination_*",
+      "mcp__claude-flow__daa_*",
+      "mcp__claude-flow__embeddings_*",
+      "mcp__claude-flow__federation_*",
+      "mcp__claude-flow__github_*",
+      "mcp__claude-flow__github_issue_track",
+      "mcp__claude-flow__github_pr_manage",
+      "mcp__claude-flow__github_workflow",
+      "mcp__claude-flow__guidance_*",
+      "mcp__claude-flow__hive-mind_*",
+      "mcp__claude-flow__hive-mind_spawn",
+      "mcp__claude-flow__hooks_*",
+      "mcp__claude-flow__http_fetch",
+      "mcp__claude-flow__managed_agent_*",
+      "mcp__claude-flow__managed_agent_create",
+      "mcp__claude-flow__mcp_*",
+      "mcp__claude-flow__memory_bridge_status",
+      "mcp__claude-flow__memory_cleanup",
+      "mcp__claude-flow__memory_compress",
+      "mcp__claude-flow__memory_delete",
+      "mcp__claude-flow__memory_detailed-stats",
+      "mcp__claude-flow__memory_export",
+      "mcp__claude-flow__memory_import",
+      "mcp__claude-flow__memory_import_claude",
+      "mcp__claude-flow__memory_migrate",
+      "mcp__claude-flow__memory_search_unified",
+      "mcp__claude-flow__metaharness_*",
+      "mcp__claude-flow__neural_*",
+      "mcp__claude-flow__performance_*",
+      "mcp__claude-flow__policy_*",
+      "mcp__claude-flow__progress_*",
+      "mcp__claude-flow__ruvllm_*",
+      "mcp__claude-flow__seraphina_*",
+      "mcp__claude-flow__session_*",
+      "mcp__claude-flow__swarm_pheromone_status",
+      "mcp__claude-flow__swarm_pheromone_update",
+      "mcp__claude-flow__system_*",
+      "mcp__claude-flow__system_reset",
+      "mcp__claude-flow__terminal_*",
+      "mcp__claude-flow__terminal_create",
+      "mcp__claude-flow__terminal_execute",
+      "mcp__claude-flow__terminal_history",
+      "mcp__claude-flow__transfer_*",
+      "mcp__claude-flow__transfer_ipfs-resolve",
+      "mcp__claude-flow__transfer_plugin-*",
+      "mcp__claude-flow__transfer_store-download",
+      "mcp__claude-flow__wasm_agent_*",
+      "mcp__claude-flow__wasm_gallery_*",
+      "mcp__claude-flow__workflow_*",
+      "mcp__claude-flow__workflow_delete",
+      "mcp__claude-flow__x_federation_*",
+      "Read(./.env)",
+      "Read(./.env.*)"
+    ]
+  },
+  "env": {
+    "CLAUDE_FLOW_V3_ENABLED": "true",
+    "CLAUDE_FLOW_HOOKS_ENABLED": "false"
+  },
+  "claudeFlow": {
+    "version": "3.0.0",
+    "enabled": true,
+    "platform": {
+      "os": "linux",
+      "arch": "x64",
+      "shell": "bash"
+    },
+    "agentTeams": {
+      "enabled": true,
+      "teammateMode": "auto",
+      "taskListEnabled": true,
+      "mailboxEnabled": true,
+      "coordination": {
+        "autoAssignOnIdle": false,
+        "trainPatternsOnComplete": false,
+        "notifyLeadOnComplete": true,
+        "sharedMemoryNamespace": "agent-teams"
+      },
+      "hooks": {
+        "teammateIdle": {
+          "enabled": true,
+          "autoAssign": false,
+          "checkTaskList": true
+        },
+        "taskCompleted": {
+          "enabled": true,
+          "trainPatterns": false,
+          "notifyLead": true
+        }
+      }
+    },
+    "swarm": {
+      "topology": "hierarchical",
+      "maxAgents": 5
+    },
+    "memory": {
+      "backend": "memory",
+      "enableHNSW": false,
+      "learningBridge": {
+        "enabled": false
+      },
+      "memoryGraph": {
+        "enabled": false
+      },
+      "agentScopes": {
+        "enabled": false
+      }
+    },
+    "neural": {
+      "enabled": false
+    },
+    "daemon": {
+      "autoStart": false,
+      "workers": [
+        "map",
+        "audit",
+        "optimize"
+      ],
+      "schedules": {
+        "audit": {
+          "interval": "4h",
+          "priority": "critical"
+        },
+        "optimize": {
+          "interval": "2h",
+          "priority": "high"
+        }
+      }
+    },
+    "learning": {
+      "enabled": false,
+      "autoTrain": false,
+      "patterns": [
+        "coordination",
+        "optimization",
+        "prediction"
+      ],
+      "retention": {
+        "shortTerm": "24h",
+        "longTerm": "30d"
+      }
+    },
+    "adr": {
+      "autoGenerate": false,
+      "directory": "docs/adr",
+      "template": "madr"
+    },
+    "ddd": {
+      "trackDomains": false,
+      "validateBoundedContexts": false,
+      "directory": "docs/ddd"
+    },
+    "security": {
+      "autoScan": false,
+      "scanOnEdit": false,
+      "cveCheck": false,
+      "threatModel": false
+    }
+  }
+}

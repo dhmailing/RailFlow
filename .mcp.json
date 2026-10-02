@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "claude-flow": {
+      "command": "node",
+      "args": [
+        "tools/ruflo-runtime/node_modules/ruflo/bin/ruflo.js",
+        "mcp",
+        "start"
+      ],
+      "env": {
+        "CLAUDE_FLOW_MODE": "v3",
+        "CLAUDE_FLOW_HOOKS_ENABLED": "false",
+        "CLAUDE_FLOW_TOPOLOGY": "hierarchical",
+        "CLAUDE_FLOW_MAX_AGENTS": "5",
+        "CLAUDE_FLOW_MEMORY_BACKEND": "memory"
+      },
+      "autoStart": false
+    }
+  }
+}
