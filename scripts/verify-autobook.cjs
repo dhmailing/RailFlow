@@ -280,6 +280,100 @@ check("서버형 자동예약에 브라우저 자동화가 없다", () => {
   }
 });
 
+// T7: 위 검사는 lib/autobook + 2개 파일만 본다. 그래서 저장소의 **다른 곳**에
+// 새 파일을 만들어 브라우저로 공식 예매 화면에 접근하면 그대로 통과한다.
+// (Ruflo 평가 중 드러난 구멍 — docs/RUFLO-EVALUATION.md.) 아래 세 검사가
+// 그 구멍을 막는다.
+
+// 브라우저를 실제로 구동·조작하는 토큰. 타입 선언이나 주석에 이름만 나오는
+// 경우와 구분하려고 호출 형태를 본다.
+const BROWSER_DRIVE_TOKENS = [
+  "chromium.launch",
+  "chromium.connect",
+  "firefox.launch",
+  "webkit.launch",
+  "puppeteer.launch",
+  "browser.newPage",
+  "browser.newContext",
+  "page.goto",
+  'from "playwright',
+  "from 'playwright",
+  'require("playwright',
+  "require('playwright",
+];
+
+// 브라우저를 구동할 수 있는 파일의 **허용 목록**. 새 파일이 브라우저를 몰면
+// 이 목록에 의도적으로 올려야 하고, 올리는 순간 리뷰에 걸린다.
+const BROWSER_ALLOWED_FILES = {
+  // v0.7 자동화 Provider. RailFlow 자체 데모 화면만 띄우며 host-guard 를 지난다.
+  "lib/automation/providers/mock-browser-provider.ts": "v0.7 데모 Provider (host-guard 경유)",
+  // Provider 인터페이스·대체 구현. 토큰이 주석·타입에만 나온다.
+  "lib/automation/provider.ts": "Provider 선택 로직",
+  "lib/automation/providers/mock-direct-provider.ts": "브라우저 없는 대체 Provider",
+  // 테스트·빌드 설정. 제품에 실리지 않고 localhost 만 대상으로 한다.
+  "playwright.config.ts": "E2E 러너 설정",
+  "vite.config.ts": "빌드 설정(external 목록)",
+  "tests/e2e/autobook-panel.spec.ts": "E2E (localhost)",
+  "tests/e2e/booking-automation-demo.spec.ts": "E2E (localhost)",
+  "tests/e2e/candidate-card-layout.spec.ts": "E2E (localhost)",
+  "tests/e2e/mock-browser-provider.contract.spec.ts": "E2E (localhost)",
+  "tests/e2e/autobook-handoff.spec.ts": "E2E (localhost)",
+  "tests/e2e/watch-jobs-source.spec.ts": "E2E (localhost)",
+  // 검사 스크립트 자체. 토큰을 문자열로 들고 있다.
+  "scripts/verify-autobook.cjs": "이 검사 스크립트",
+  "scripts/verify-booking-simulator.cjs": "데모 시뮬레이터 검사",
+};
+
+function codeFiles() {
+  return repoFiles().filter(
+    (f) => /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f) && !f.startsWith("tools/ruflo-runtime/"),
+  );
+}
+
+check("T7: 저장소 어디서도 허용되지 않은 브라우저 구동이 없다", () => {
+  for (const file of codeFiles()) {
+    if (file in BROWSER_ALLOWED_FILES) continue;
+    const body = read(file);
+    for (const token of BROWSER_DRIVE_TOKENS) {
+      assert(
+        !body.includes(token),
+        `허용 목록에 없는 파일이 브라우저를 구동한다: ${file} → ${token}. ` +
+          "공식 예매 화면 조작은 CLAUDE.md 와 ADR 0003 이 금지한다. 정말 필요하면 " +
+          "BROWSER_ALLOWED_FILES 에 이유를 적어 올려야 한다.",
+      );
+    }
+  }
+});
+
+check("T7: 제품 코드의 브라우저 이동은 host-guard 를 지난다", () => {
+  // 테스트·설정은 제외한다(제품에 실리지 않고 localhost 만 본다).
+  for (const [file, reason] of Object.entries(BROWSER_ALLOWED_FILES)) {
+    if (!file.startsWith("lib/") && !file.startsWith("app/")) continue;
+    const body = read(file);
+    if (!body.includes("page.goto")) continue;
+    assert(
+      body.includes("assertAutomationTargetAllowed") || body.includes("buildAutomationTargetUrl"),
+      `${file}(${reason}) 가 host-guard 를 거치지 않고 페이지를 이동한다`,
+    );
+  }
+});
+
+check("T7: host-guard 가 허용 목록 방식(fail-closed)을 유지한다", () => {
+  const guard = strip(read("lib/automation/host-guard.ts"));
+  // 루프백과 이 배포 자신의 호스트만 통과시키고, 나머지는 거부로 끝난다.
+  assert(/isLoopbackHostname/.test(guard), "루프백 판정이 사라졌다");
+  assert(/currentDeploymentHostname/.test(guard), "자기 배포 호스트 판정이 사라졌다");
+  assert(/VERCEL_URL/.test(guard), "자기 호스트를 플랫폼 값에서 읽지 않는다");
+  // 함수가 거부로 끝나야 한다 -- 마지막 분기가 denyNotAllowed 여야 "허용 목록"이다.
+  const fn = guard.split("export function assertAutomationTargetAllowed")[1] ?? "";
+  const bodyEnd = fn.split("\n}")[0];
+  assert(/denyNotAllowed\([\s\S]*\);\s*$/.test(bodyEnd.trimEnd()), "host-guard 가 거부로 끝나지 않는다(fail-open 위험)");
+  // 철도 호스트 거부 목록이 남아 있어야 한다(다중 방어).
+  for (const host of ["korail.com", "letskorail.com", "srail.or.kr", "sr.co.kr"]) {
+    assert(guard.includes(host), `거부 목록에서 ${host} 가 빠졌다`);
+  }
+});
+
 check("실사이트 브라우저 자동화 의존성·스크립트가 없다", () => {
   const pkg = JSON.parse(read("package.json"));
   const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
