@@ -519,6 +519,12 @@ async function main() {
     assert.equal(mixedSource.status, 400, '출처가 섞인 작업이 통과했다');
     assert.equal((await mixedSource.json()).error.code, 'INVALID_CANDIDATE_SOURCE');
 
+    // 역 ID 가 가리키는 출처와 후보의 출처가 어긋나면 거부한다. (위 '혼재'
+    // 케이스는 후보끼리 다른 경우고, 이건 후보는 하나인데 역 ID 와 다른 경우다.)
+    const stationMismatch = await create([{ externalKey: 'mismatch-1', source: 'tago', trainNumber: 'KTX 20', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }], 'block-cand-mismatch');
+    assert.equal(stationMismatch.status, 400, '역 ID 와 어긋난 출처가 통과했다');
+    assert.equal((await stationMismatch.json()).error.code, 'INVALID_CANDIDATE_SOURCE');
+
     // 시연 시나리오는 데모 후보에만 붙을 수 있다.
     const scenarioOnReal = await create([{ externalKey: 'sc-1', source: 'tago', trainNumber: 'KTX 11', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00', mockScenario: 'no_seat_ever' }], 'block-cand-scenario');
     assert.equal(scenarioOnReal.status, 400, '실제 후보에 시연 시나리오가 붙었다');
