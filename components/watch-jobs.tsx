@@ -8,6 +8,8 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { stationNames } from "@/lib/rail/stations";
+import type { CandidateSource } from "@/lib/rail/candidate-source";
+import { SEAT_CLASS_LABEL, mapToWatchSeatClass, type AutobookSeatClass } from "@/lib/autobook/handoff";
 import type { AuthUser } from "@/components/auth-panel";
 
 const stations: string[] = [...stationNames];
@@ -63,6 +65,11 @@ const STATUS_LABEL: Record<JobStatus, string> = {
 
 const CHANNEL_LABEL: Record<string, string> = { email: "이메일", telegram: "텔레그램", fcm: "푸시(FCM)", webpush: "웹 푸시" };
 
+const SOURCE_NOTE: Record<CandidateSource, string> = {
+  demo: "가상 열차 — 데모 운행정보에서 온 값입니다.",
+  tago: "실제 시간표 — 공공데이터에서 온 값입니다.",
+};
+
 async function readJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
@@ -72,17 +79,28 @@ export type WatchJobPrefill = {
   arrival: string;
   date: string;
   passengers: string;
-  candidates: { trainNumber: string; departAt: string; arriveAt: string }[];
+  // 후보의 출처를 함께 받는다. 이 값이 없으면 데모에서 고른 열차와 실제
+  // 시간표에서 고른 열차를 이 패널이 구분할 수 없다.
+  candidates: { trainNumber: string; departAt: string; arriveAt: string; source: CandidateSource }[];
 };
 
 export default function WatchJobsPanel({
   user,
   prefill = null,
   onClearPrefill,
+  seatClass,
+  onSeatClassChange,
 }: {
   user: AuthUser | null;
   prefill?: WatchJobPrefill | null;
   onClearPrefill?: () => void;
+  /**
+   * 좌석등급은 **두 패널이 공유하는 예약 조건**이다. 자동예약 탭 안에서 패널마다
+   * 다른 값을 들고 있으면, 서버형에서 "일반실만"을 고른 사용자가 이 패널에서는
+   * 특실 허용 조건을 보게 된다. 그래서 여기서 들지 않고 받아 쓴다.
+   */
+  seatClass: AutobookSeatClass;
+  onSeatClassChange: (value: AutobookSeatClass) => void;
 }) {
   const [status, setStatus] = useState<ProviderStatus | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
@@ -98,9 +116,15 @@ export default function WatchJobsPanel({
   const [timeRangeEnd, setTimeRangeEnd] = useState("18:00");
   const [trainType, setTrainType] = useState("KTX");
   const [passengers, setPassengers] = useState("1");
-  const [seatClassPreference, setSeatClassPreference] = useState<"standard_only" | "standard_preferred" | "any">("standard_preferred");
+  // 감시 경로가 받아들이는 값으로 옮긴다. 옮길 수 없으면 등록을 막는다.
+  const watchSeatClass = mapToWatchSeatClass(seatClass);
   const [watchHours, setWatchHours] = useState("6");
-  const [candidateRows, setCandidateRows] = useState([{ trainNumber: "KTX 101", departAt: "10:00", arriveAt: "12:00", mockScenario: "seat_after_one_check" }]);
+  // 손으로 넣은 줄의 출처는 "demo" 다. 이 패널은 데모 역 ID(demo-N)로 작업을
+  // 만들고 Provider 도 mock 이므로, 직접 입력한 열차번호는 실제 시간표에서 온
+  // 값이 아니다. 예매 탭에서 넘어온 줄만 그 후보의 출처를 그대로 쓴다.
+  const [candidateRows, setCandidateRows] = useState<
+    { trainNumber: string; departAt: string; arriveAt: string; mockScenario: string; source: CandidateSource }[]
+  >([{ trainNumber: "KTX 101", departAt: "10:00", arriveAt: "12:00", mockScenario: "seat_after_one_check", source: "demo" }]);
   const [selectedDeviceIds, setSelectedDeviceIds] = useState<string[]>([]);
   const [deviceChannel, setDeviceChannel] = useState<"email" | "telegram">("email");
   const [deviceToken, setDeviceToken] = useState("");
@@ -130,6 +154,9 @@ export default function WatchJobsPanel({
         departAt: candidate.departAt,
         arriveAt: candidate.arriveAt,
         mockScenario: "",
+        // 넘어온 후보의 출처를 그대로 쓴다. 여기서 "demo" 로 깎으면 실제
+        // 시간표에서 고른 열차가 가상 작업으로 조용히 등록된다.
+        source: candidate.source,
       })),
     );
   }
@@ -196,10 +223,27 @@ export default function WatchJobsPanel({
 
   const addCandidateRow = () => {
     if (candidateRows.length >= 3) return;
-    setCandidateRows((rows) => [...rows, { trainNumber: `KTX ${100 + rows.length}`, departAt: "10:00", arriveAt: "12:00", mockScenario: "seat_after_one_check" }]);
+    setCandidateRows((rows) => [
+      ...rows,
+      { trainNumber: `KTX ${100 + rows.length}`, departAt: "10:00", arriveAt: "12:00", mockScenario: "seat_after_one_check", source: "demo" },
+    ]);
   };
 
+  // 실제 시간표에서 고른 후보가 섞여 있으면 이 경로로 등록할 수 없다. 서버도
+  // 같은 이유로 거부하지만(app/api/watch-jobs/route.ts), 눌러 보고 실패하게
+  // 두지 않고 먼저 사유를 보여준다.
+  const realSourceRows = candidateRows.filter((row) => row.source === "tago");
+  const blockedReason = !watchSeatClass.ok
+    ? watchSeatClass.reason
+    : realSourceRows.length > 0
+      ? `실제 시간표에서 고른 열차 ${realSourceRows.length}편이 들어 있습니다. 이 감시 경로는 가상 시연이며 실제 좌석을 조회하지 않으므로 등록을 막습니다.`
+      : null;
+
   const createJob = async () => {
+    if (blockedReason) {
+      toast.error(blockedReason);
+      return;
+    }
     if (!date || departure === arrival || selectedDeviceIds.length === 0) {
       toast.error("역·날짜와 알림 받을 기기를 하나 이상 선택해주세요.");
       return;
@@ -213,6 +257,7 @@ export default function WatchJobsPanel({
         trainType,
         departAt: `${date}T${row.departAt}:00+09:00`,
         arriveAt: `${date}T${row.arriveAt}:00+09:00`,
+        source: row.source,
         ...(isDev && row.mockScenario ? { mockScenario: row.mockScenario } : {}),
         _index: index,
       }));
@@ -223,7 +268,9 @@ export default function WatchJobsPanel({
           departure, arrival,
           departureId: `demo-${stations.indexOf(departure)}`,
           arrivalId: `demo-${stations.indexOf(arrival)}`,
-          date, timeRangeStart, timeRangeEnd, trainType, passengers, seatClassPreference,
+          date, timeRangeStart, timeRangeEnd, trainType, passengers,
+          // 감시 경로의 어휘로 옮긴 값. 옮길 수 없는 값은 위에서 이미 막혔다.
+          seatClassPreference: watchSeatClass.ok ? watchSeatClass.value : undefined,
           candidates: candidates.map(({ _index, ...c }) => { void _index; return c; }),
           watchUntil,
           notificationMethods: selectedDeviceIds.map((deviceId) => ({
@@ -465,11 +512,21 @@ export default function WatchJobsPanel({
             </select>
           </label>
           <label className="text-sm text-white/55">좌석 등급
-            <select value={seatClassPreference} onChange={(e) => setSeatClassPreference(e.target.value as typeof seatClassPreference)} className="mt-1 w-full rounded-lg border border-white/10 bg-[#111] p-2 text-white">
-              <option value="standard_only">일반실만</option>
-              <option value="standard_preferred">일반실 우선, 없으면 특실 허용</option>
-              <option value="any">특실 허용</option>
+            <select
+              data-testid="watch-seat-class"
+              value={seatClass}
+              onChange={(e) => onSeatClassChange(e.target.value as AutobookSeatClass)}
+              className="mt-1 w-full rounded-lg border border-white/10 bg-[#111] p-2 text-white"
+            >
+              <option value="standard_only">{SEAT_CLASS_LABEL.standard_only}</option>
+              <option value="any">{SEAT_CLASS_LABEL.any}</option>
+              <option value="first_only">{SEAT_CLASS_LABEL.first_only}</option>
             </select>
+            {!watchSeatClass.ok && (
+              <span data-testid="watch-seat-class-unsupported" role="alert" className="mt-1 block text-xs font-normal leading-5 text-amber-200/90">
+                {watchSeatClass.reason}
+              </span>
+            )}
           </label>
           <label className="text-sm text-white/55 sm:col-span-2">감시 종료시간
             <select value={watchHours} onChange={(e) => setWatchHours(e.target.value)} className="mt-1 w-full rounded-lg border border-white/10 bg-[#111] p-2 text-white">
@@ -485,6 +542,13 @@ export default function WatchJobsPanel({
             <div className="space-y-2">
               {candidateRows.map((row, index) => (
                 <div key={index} className="grid grid-cols-3 gap-2 rounded-xl border border-white/10 bg-black/20 p-2">
+                  <p
+                    data-testid="watch-candidate-source"
+                    data-train-source={row.source}
+                    className={`col-span-3 text-[11px] font-bold leading-4 ${row.source === "demo" ? "text-[#ffad62]" : "text-amber-200/90"}`}
+                  >
+                    {SOURCE_NOTE[row.source]}
+                  </p>
                   <input value={row.trainNumber} onChange={(e) => setCandidateRows((rows) => rows.map((r, i) => (i === index ? { ...r, trainNumber: e.target.value } : r)))} placeholder="열차번호" className="rounded-lg border border-white/10 bg-[#111] p-2 text-xs text-white" />
                   <input type="time" value={row.departAt} onChange={(e) => setCandidateRows((rows) => rows.map((r, i) => (i === index ? { ...r, departAt: e.target.value } : r)))} className="rounded-lg border border-white/10 bg-[#111] p-2 text-xs text-white [color-scheme:dark]" />
                   <input type="time" value={row.arriveAt} onChange={(e) => setCandidateRows((rows) => rows.map((r, i) => (i === index ? { ...r, arriveAt: e.target.value } : r)))} className="rounded-lg border border-white/10 bg-[#111] p-2 text-xs text-white [color-scheme:dark]" />
@@ -500,9 +564,22 @@ export default function WatchJobsPanel({
             </div>
           </div>
 
-          <Button type="button" disabled={submitting || departure === arrival || !date} onClick={createJob} className="h-11 rounded-xl bg-[#ff8a1f] font-extrabold text-black hover:bg-[#ff9d45] sm:col-span-2">
-            {submitting ? <LoaderCircle className="size-4 animate-spin" /> : null} 취소표 감시 등록
-          </Button>
+          <div className="space-y-2 sm:col-span-2">
+            {blockedReason && (
+              <p data-testid="watch-blocked-reason" role="alert" className="rounded-xl border border-amber-400/30 bg-amber-400/[0.07] px-3 py-2 text-xs leading-5 text-amber-200/90">
+                {blockedReason}
+              </p>
+            )}
+            <Button
+              type="button"
+              data-testid="watch-create-job"
+              disabled={submitting || departure === arrival || !date || blockedReason !== null}
+              onClick={createJob}
+              className="h-11 w-full rounded-xl bg-[#ff8a1f] font-extrabold text-black hover:bg-[#ff9d45]"
+            >
+              {submitting ? <LoaderCircle className="size-4 animate-spin" /> : null} 취소표 감시 등록
+            </Button>
+          </div>
         </CardContent>
       </Card>
       </>

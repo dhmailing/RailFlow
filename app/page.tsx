@@ -29,6 +29,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster } from "@/components/ui/sonner";
 import { stationNames } from "@/lib/rail/stations";
 import type { RailProviderMode, TrainResult, TrainSearchResponse } from "@/lib/rail/types";
+import {
+  buildAutobookHandoff,
+  DEFAULT_SEAT_CLASS,
+  parseSeatClass,
+  restoreCandidates,
+  type AutobookSeatClass,
+  type StoredCandidate,
+} from "@/lib/autobook/handoff";
 import type { AuthUser } from "@/components/auth-panel";
 import { toast } from "sonner";
 
@@ -36,17 +44,9 @@ import { toast } from "sonner";
 // 순수 선택 상태이며, 실제 감시는 자동예약 탭에서 조건을 등록해야 시작된다.
 // conditionKey는 이 후보가 어느 검색 조건(구간·날짜)에서 고른 것인지를 들고
 // 있어, 검색 조건이 바뀌면 오래된 후보가 남지 않도록 걸러내는 데 쓴다.
-type CandidateSelection = {
-  id: string;
-  number: string;
-  trainType: string;
-  depart: string;
-  arrive: string;
-  fare: string;
-  departure: string;
-  arrival: string;
-  date: string;
-};
+//
+// 모양과 복원 규칙은 lib/autobook/handoff.ts 에 있다. 특히 `source`(실제
+// 시간표인지 데모인지)는 선택 → 저장 → 등록 화면까지 끝까지 함께 간다.
 
 function conditionKeyOf(departure: string, arrival: string, date: string) {
   return `${departure}|${arrival}|${date}`;
@@ -102,7 +102,13 @@ export default function Home() {
   const [providerMode, setProviderMode] = useState<RailProviderMode | "checking">("checking");
   const [resultMode, setResultMode] = useState<RailProviderMode>("demo");
   const [sourceLabel, setSourceLabel] = useState("연결 상태 확인 중");
-  const [selectedCandidates, setSelectedCandidates] = useState<CandidateSelection[]>([]);
+  const [selectedCandidates, setSelectedCandidates] = useState<StoredCandidate[]>([]);
+  // 좌석등급은 **예약 조건**이므로 자동예약 패널 내부가 아니라 여기서 든다.
+  // 패널은 탭을 옮길 때 언마운트되므로 패널 안에 두면 왕복 한 번에
+  // 사용자가 고른 값이 사라진다.
+  const [seatClass, setSeatClass] = useState<AutobookSeatClass>(DEFAULT_SEAT_CLASS);
+  // 출처를 확인할 수 없어 버린 옛 후보 수. 재선택을 안내하는 데만 쓴다.
+  const [unknownSourceDropped, setUnknownSourceDropped] = useState(0);
   const [notifications, setNotifications] = useState(true);
   const [autoLogin, setAutoLogin] = useState(true);
   const [autoPay, setAutoPay] = useState(false);
@@ -149,19 +155,13 @@ export default function Home() {
       try {
         const saved = window.localStorage.getItem(storageKey);
         if (saved) {
-          // 구버전(railflow-reservations)의 "가짜 예약" 항목이 남아 있을 수
-          // 있으므로, 현재 후보 모델의 필수 필드를 모두 갖춘 항목만 복원한다.
-          const parsed: unknown = JSON.parse(saved);
-          if (Array.isArray(parsed)) {
-            setSelectedCandidates(
-              parsed.filter((item): item is CandidateSelection =>
-                !!item && typeof item === "object" &&
-                typeof (item as CandidateSelection).id === "string" &&
-                typeof (item as CandidateSelection).departure === "string" &&
-                typeof (item as CandidateSelection).arrival === "string" &&
-                typeof (item as CandidateSelection).date === "string",
-              ),
-            );
+          // 구버전의 "가짜 예약" 항목, 그리고 **출처(source)가 없는** 옛
+          // 후보가 남아 있을 수 있다. 출처가 없는 항목은 데모였는지 실제
+          // 시간표였는지 알 수 없으므로 실제 후보로 추정하지 않고 버린다.
+          const restored = restoreCandidates(JSON.parse(saved) as unknown);
+          setSelectedCandidates(restored.candidates);
+          if (restored.droppedUnknownSource > 0) {
+            setUnknownSourceDropped(restored.droppedUnknownSource);
           }
         }
         const savedSettings = window.localStorage.getItem(settingsKey);
@@ -170,6 +170,9 @@ export default function Home() {
           setNotifications(settings.notifications ?? true);
           setAutoLogin(settings.autoLogin ?? true);
           setAutoPay(settings.autoPay ?? false);
+          // 저장된 값이 깨졌거나 없으면 기본값(일반실만)으로 둔다. 사용자가
+          // 고르지 않은 "특실 허용"으로 올라가지 않게 한다.
+          setSeatClass(parseSeatClass(settings.seatClass) ?? DEFAULT_SEAT_CLASS);
         }
       } catch {
         window.localStorage.removeItem(storageKey);
@@ -197,8 +200,8 @@ export default function Home() {
   useEffect(() => {
     if (!storageReady) return;
     window.localStorage.setItem(storageKey, JSON.stringify(selectedCandidates));
-    window.localStorage.setItem(settingsKey, JSON.stringify({ notifications, autoLogin, autoPay }));
-  }, [selectedCandidates, notifications, autoLogin, autoPay, storageReady]);
+    window.localStorage.setItem(settingsKey, JSON.stringify({ notifications, autoLogin, autoPay, seatClass }));
+  }, [selectedCandidates, notifications, autoLogin, autoPay, seatClass, storageReady]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -339,6 +342,8 @@ export default function Home() {
           departure: conditionDeparture,
           arrival: conditionArrival,
           date: conditionDate,
+          // 출처를 여기서 놓치면 이후 어느 화면도 되살릴 수 없다.
+          source: train.source,
         },
       ];
     });
@@ -541,6 +546,17 @@ export default function Home() {
                 </div>
 
                 <div className="min-w-0 space-y-3">
+                  {unknownSourceDropped > 0 && (
+                    <div
+                      data-testid="candidate-unknown-source-note"
+                      role="status"
+                      className="rounded-2xl border border-amber-400/30 bg-amber-400/[0.07] p-4 text-xs leading-5 text-amber-200/90"
+                    >
+                      이전에 저장된 자동예약 후보 {unknownSourceDropped}편은 <strong>실제 시간표에서 고른 것인지 데모에서 고른
+                      것인지 확인할 수 없어</strong> 비웠습니다. 데모 열차가 실제 작업으로 섞여 들어가지 않도록 추정하지
+                      않습니다. 열차를 다시 검색해 후보를 선택해 주세요.
+                    </div>
+                  )}
                   {selectedCandidates.length > 0 && (
                     <div data-testid="candidate-tray" className="rounded-2xl border border-[#ff8a1f]/30 bg-[#ff8a1f]/[0.07] p-4">
                       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -562,8 +578,18 @@ export default function Home() {
                       <ul className="mt-3 space-y-1.5">
                         {selectedCandidates.map((candidate) => (
                           <li key={candidate.id} className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/25 px-3 py-2 text-xs">
-                            <span className="min-w-0 truncate text-white/70">
-                              {candidate.number} · {candidate.depart} 출발 · {candidate.departure}→{candidate.arrival} · {candidate.date}
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              {candidate.source === "demo" && (
+                                <span
+                                  data-testid="candidate-source-demo"
+                                  className="shrink-0 rounded-full bg-[#ff8a1f]/15 px-1.5 py-0.5 text-[10px] font-bold text-[#ffad62]"
+                                >
+                                  가상 열차
+                                </span>
+                              )}
+                              <span className="min-w-0 truncate text-white/70">
+                                {candidate.number} · {candidate.depart} 출발 · {candidate.departure}→{candidate.arrival} · {candidate.date}
+                              </span>
                             </span>
                             <Button
                               type="button"
@@ -590,8 +616,13 @@ export default function Home() {
             <TabsContent value="automation" className="m-0">
               {activeTab === "automation" && (
                 <div className="space-y-8">
+                  {/* 좌석등급은 두 패널이 같은 상태를 쓴다. 후보의 출처(실제 시간표
+                      /데모)도 함께 넘긴다 -- 여기서 빠뜨리면 데모 열차가 감시
+                      작업으로 조용히 등록된다. */}
                   <WatchJobsPanel
                     user={authUser}
+                    seatClass={seatClass}
+                    onSeatClassChange={setSeatClass}
                     prefill={
                       selectedCandidates.length > 0
                         ? {
@@ -603,6 +634,7 @@ export default function Home() {
                               trainNumber: candidate.number,
                               departAt: candidate.depart,
                               arriveAt: candidate.arrive,
+                              source: candidate.source,
                             })),
                           }
                         : null
@@ -610,7 +642,13 @@ export default function Home() {
                     onClearPrefill={clearCandidates}
                   />
                   <div className="mx-auto max-w-3xl border-t border-white/10 pt-6">
-                    <AutobookPanel />
+                    {/* 검색 화면에서 고른 열차·조건을 서버형 자동예약 등록 화면에도
+                        그대로 넘긴다. 등록은 여전히 막혀 있고, 패널이 그 사유를
+                        표시한다. 넘어온 값을 "진행 중인 작업"으로 보여주지 않는다. */}
+                    <AutobookPanel
+                      handoff={buildAutobookHandoff({ candidates: selectedCandidates, passengers, seatClass })}
+                      onSeatClassChange={setSeatClass}
+                    />
                   </div>
                   <div className="mx-auto max-w-3xl border-t border-white/10 pt-6">
                     <AutomationJobsPanel user={authUser} />
@@ -698,6 +736,52 @@ function FieldShell({ label, icon, children }: { label: string; icon: React.Reac
   );
 }
 
+// 검색 결과 카드의 좌석 표시.
+//
+// 중요한 구분이 두 개 있다.
+//
+// 1. **실제 좌석을 조회한 적이 없다.** TAGO(공공데이터)는 시간표와 운임만
+//    주고 잔여좌석을 주지 않는다. 그래서 실제 열차(source === "tago")에는
+//    "예약 가능"이나 "매진"을 절대 쓰지 않고 "좌석 미조회"만 쓴다. TAGO를
+//    다시 불러도, 이 페이지를 새로고침해도 좌석을 조회한 것이 아니다.
+// 2. **가상 시연 값과 실제 상태를 섞지 않는다.** 데모 열차의 좌석 표시는
+//    고정된 가상값이므로 "가상"을 붙이고 MOCK 칩을 함께 세운다.
+//
+// 일반실·특실을 나눠 보여주는 것은 실제 조회가 연결된 뒤에만 가능하다.
+// 자리만 만들어 두면 빈 칸이 실제 상태처럼 읽히므로 만들지 않는다.
+function SeatBadge({ train }: { train: TrainResult }) {
+  if (train.source === "demo") {
+    const label =
+      train.availability === "available"
+        ? "가상 예약 가능"
+        : train.availability === "sold_out"
+          ? "가상 매진"
+          : "가상 상태 불명";
+    return (
+      <span className="flex items-center gap-1">
+        <span
+          data-testid="seat-state"
+          data-seat-state="simulated"
+          className="rounded-full bg-[#ff8a1f]/12 px-2 py-0.5 text-[11px] font-bold text-[#ffad62]"
+        >
+          {label}
+        </span>
+        <span className="rounded-full bg-[#ff8a1f]/15 px-1.5 py-0.5 text-[10px] font-bold text-[#ffad62]">MOCK</span>
+      </span>
+    );
+  }
+
+  return (
+    <span
+      data-testid="seat-state"
+      data-seat-state="not-checked"
+      className="rounded-full bg-white/[0.07] px-2 py-0.5 text-[11px] font-bold text-white/45"
+    >
+      좌석 미조회
+    </span>
+  );
+}
+
 function TrainResults({
   hasSearched,
   trains,
@@ -744,7 +828,7 @@ function TrainResults({
       ) : (
         <div className="space-y-3">
           <div className={`rounded-xl px-3 py-2 text-xs font-semibold ${mode === "live" ? "bg-emerald-400/10 text-emerald-300" : "bg-[#ff8a1f]/10 text-[#ffad62]"}`}>
-            {sourceLabel}{mode === "live" ? " · 좌석 잔여 미제공" : ""}
+            {sourceLabel}{mode === "live" ? " · 좌석 미조회 (실제 좌석 조회 미연결)" : " · 좌석 표시는 가상값"}
           </div>
           {trains.map((train) => (
             <article key={train.id} className="rounded-2xl border border-white/10 bg-black/35 p-4 transition hover:border-white/20">
@@ -752,9 +836,7 @@ function TrainResults({
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-bold text-[#ff9b3f]">{train.number}</span>
-                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${train.availability === "available" ? "bg-emerald-400/12 text-emerald-300" : "bg-white/[0.07] text-white/45"}`}>
-                      {train.availability === "available" ? "예약 가능" : train.availability === "sold_out" ? "매진" : "좌석 확인 필요"}
-                    </span>
+                    <SeatBadge train={train} />
                   </div>
                   <div className="mt-3 flex items-center gap-3"><strong className="text-2xl tracking-tight">{train.depart}</strong><span className="h-px w-8 bg-white/20" /><strong className="text-2xl tracking-tight">{train.arrive}</strong></div>
                   <p className="mt-1 text-xs text-white/38">{train.duration} · 성인 1인 {train.fare}</p>
@@ -779,6 +861,11 @@ function TrainResults({
               </div>
             </article>
           ))}
+          <p data-testid="seat-state-footnote" className="rounded-xl bg-white/[0.03] px-3 py-2 text-[11px] leading-5 text-white/40">
+            {mode === "live"
+              ? "공공데이터는 시간표·운임만 제공합니다. 일반실·특실의 예약 가능 / 매진 / 예약대기 상태는 실제 좌석 조회가 연결된 뒤에만 표시됩니다. 지금은 조회하지 않았습니다."
+              : "데모 열차의 좌석 표시는 고정된 가상값입니다. 실제 잔여좌석이 아닙니다."}
+          </p>
         </div>
       )}
     </section>

@@ -1,5 +1,7 @@
 import "server-only";
 
+import type { CandidateSource } from "@/lib/rail/candidate-source";
+
 // The v0.5 "취소표 감시(Seat Watch)" domain. RailFlow never books or pays for
 // a seat here -- it only watches and notifies. A human always completes the
 // real reservation in 코레일+/공식 예매. See docs/V0.5-SEAT-WATCH.md.
@@ -95,6 +97,10 @@ export type TrainCandidate = {
   trainType: string;
   departAt: string;
   arriveAt: string;
+  // 이 후보가 어디서 온 값인지. 검색 결과에서 등록 요청까지 함께 옮긴다.
+  // 입력 일관성 검사의 대상이며(app/api/watch-jobs/route.ts), 실제 열차의
+  // 진위를 증명하는 값이 아니다 -- lib/rail/candidate-source.ts 머리말 참고.
+  source: CandidateSource;
   mockScenario?: "seat_after_one_check" | "no_seat_ever" | "error_on_check";
 };
 

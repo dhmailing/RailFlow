@@ -12,6 +12,12 @@
 import { useEffect, useState } from "react";
 import { CircleCheck, CircleDashed, CircleSlash, ShieldQuestion } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  SEAT_CLASS_LABEL,
+  simulatedTrains,
+  type AutobookHandoff,
+  type AutobookSeatClass,
+} from "@/lib/autobook/handoff";
 
 type AutobookStatus = {
   runtime: {
@@ -112,7 +118,24 @@ function Ready({ ok, children }: { ok: boolean; children: React.ReactNode }) {
   );
 }
 
-export default function AutobookPanel() {
+/**
+ * 검색 화면에서 [자동예약]으로 넘어온 조건을 받는다.
+ *
+ * 이것은 **등록된 작업이 아니다.** 서버에 아무 것도 만들어지지 않은, 사용자가
+ * 고른 값일 뿐이다. 그래서 진행 상태·조회 횟수·예약번호를 함께 보여주지
+ * 않는다. 보여줄 값이 없고, 빈 칸은 실제 상태처럼 읽힌다.
+ *
+ * 좌석등급은 이 패널이 들지 않는다. 탭을 옮기면 패널이 언마운트되므로 여기서
+ * 들면 왕복 한 번에 사용자가 고른 값이 사라진다. 조건은 호출자가 들고,
+ * 패널은 보여주고 변경을 올려보낸다.
+ */
+export default function AutobookPanel({
+  handoff,
+  onSeatClassChange,
+}: {
+  handoff?: AutobookHandoff | null;
+  onSeatClassChange?: (value: AutobookSeatClass) => void;
+}) {
   const [status, setStatus] = useState<AutobookStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -259,6 +282,83 @@ export default function AutobookPanel() {
                 </Ready>
               </ul>
             </div>
+
+            {/* 검색 화면에서 [자동예약]으로 넘어온 조건. 등록된 작업이 아니다. */}
+            {handoff && handoff.trains.length > 0 && (
+              <div
+                data-testid="autobook-handoff"
+                className="space-y-3 rounded-2xl border border-[#ff8a1f]/30 bg-[#ff8a1f]/[0.06] p-3"
+              >
+                <p className="text-sm font-bold text-[#ffad62]">검색 화면에서 넘어온 조건</p>
+                <p className="text-xs leading-5 text-white/45">
+                  아래는 사용자가 고른 값이며 <strong className="text-white/70">아직 등록되지 않았습니다.</strong> 서버에
+                  작업이 만들어지지 않았으므로 진행 상태·실제 조회 횟수·마지막 조회 시각·예약정보는 표시할 것이
+                  없습니다.
+                </p>
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-sm leading-6">
+                  <dt className="text-white/40">구간</dt>
+                  <dd className="font-bold text-white/80">
+                    {handoff.departure} → {handoff.arrival}
+                  </dd>
+                  <dt className="text-white/40">운행 날짜</dt>
+                  <dd className="font-bold text-white/80">{handoff.date}</dd>
+                  <dt className="text-white/40">인원</dt>
+                  <dd className="font-bold text-white/80">{handoff.passengers}명</dd>
+                  <dt className="text-white/40">좌석등급</dt>
+                  <dd data-testid="autobook-seat-class-value" className="font-bold text-white/80">
+                    {SEAT_CLASS_LABEL[handoff.seatClass]}
+                  </dd>
+                  <dt className="text-white/40">대상 열차</dt>
+                  <dd className="space-y-0.5">
+                    {handoff.trains.map((train) => (
+                      <span
+                        key={`${train.number}-${train.depart}`}
+                        data-testid="autobook-handoff-train"
+                        data-train-source={train.source}
+                        className="flex flex-wrap items-center gap-1.5 font-bold text-white/80"
+                      >
+                        {train.source === "demo" && (
+                          <span className="rounded-full bg-[#ff8a1f]/15 px-1.5 py-0.5 text-[10px] font-bold text-[#ffad62]">
+                            가상 열차
+                          </span>
+                        )}
+                        <span className="min-w-0">
+                          {train.trainType} {train.number} · {train.depart} 출발 → {train.arrive} 도착
+                        </span>
+                      </span>
+                    ))}
+                  </dd>
+                  <dt className="text-white/40">좌석 상태</dt>
+                  <dd className="font-bold text-white/55">좌석 미조회 — 실제 좌석을 조회한 적이 없습니다</dd>
+                </dl>
+                {simulatedTrains(handoff).length > 0 && (
+                  <p
+                    data-testid="autobook-handoff-demo-warning"
+                    role="status"
+                    className="rounded-xl border border-amber-400/30 bg-amber-400/[0.07] px-3 py-2 text-xs leading-5 text-amber-200/90"
+                  >
+                    위 대상에 <strong>데모(가상) 열차</strong>가 {simulatedTrains(handoff).length}편 있습니다. 실제 운행하는
+                    열차가 아니므로 등록 경로가 열려도 실제 작업으로 등록되지 않습니다. 실제 시간표로 다시 검색해 주세요.
+                  </p>
+                )}
+                <label className="block text-xs font-bold text-white/50">
+                  좌석등급
+                  <select
+                    data-testid="autobook-seat-class"
+                    value={handoff.seatClass}
+                    onChange={(event) => onSeatClassChange?.(event.target.value as AutobookSeatClass)}
+                    className="mt-1 w-full rounded-lg border border-white/10 bg-[#111] p-2 text-sm font-normal text-white"
+                  >
+                    <option value="standard_only">{SEAT_CLASS_LABEL.standard_only}</option>
+                    <option value="any">{SEAT_CLASS_LABEL.any}</option>
+                    <option value="first_only">{SEAT_CLASS_LABEL.first_only}</option>
+                  </select>
+                  <span className="mt-1 block text-[11px] font-normal leading-5 text-white/35">
+                    기본값은 일반실만입니다. 특실을 허용하려면 직접 고르세요.
+                  </span>
+                </label>
+              </div>
+            )}
 
             {/* §7: 후보 선택은 위 검색 화면에서 가능하다. 등록은 막는다. */}
             <div className="space-y-2 rounded-2xl border border-white/10 bg-black/25 p-3">
