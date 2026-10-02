@@ -563,6 +563,54 @@ check("넘어온 자동예약 조건을 등록된 작업으로 보여주지 않�
   }
 });
 
+check("데모 후보가 실제 등록 경계를 통과하지 못한다", () => {
+  // 문자열 검사가 아니라 **함수를 실제로 돌려서** 확인한다. 등록 경로가
+  // 열리는 날, 이 경계를 지나지 않고는 작업이 만들어지지 않아야 한다.
+  const { loadTs } = require("../tests/autobook/load-ts.cjs");
+  const handoff = loadTs("lib/autobook/handoff.ts");
+
+  const train = {
+    id: "x",
+    number: "KTX 1",
+    trainType: "KTX",
+    depart: "08:00",
+    arrive: "10:00",
+    fare: "0원",
+    departure: "서울",
+    arrival: "부산",
+    date: "2026-10-20",
+  };
+
+  const demo = handoff.buildAutobookHandoff({
+    candidates: [{ ...train, source: "demo" }],
+    passengers: "1",
+    seatClass: "standard_only",
+  });
+  assert(handoff.gateHandoffForRealRegistration(demo).ok === false, "데모 후보가 실제 등록 경계를 통과했다");
+
+  const real = handoff.buildAutobookHandoff({
+    candidates: [{ ...train, source: "tago" }],
+    passengers: "1",
+    seatClass: "standard_only",
+  });
+  assert(handoff.gateHandoffForRealRegistration(real).ok === true, "실제 후보가 경계에서 막혔다");
+
+  // 출처 없는 옛 저장 데이터를 실제 후보로 추정하지 않는다.
+  const legacy = { ...train };
+  const restored = handoff.restoreCandidates([legacy]);
+  assert(restored.candidates.length === 0, "출처 없는 항목이 후보로 되살아났다");
+  assert(restored.droppedUnknownSource === 1, "재선택을 안내할 근거를 세지 않는다");
+
+  // 기본 좌석등급이 특실을 허용하지 않는다.
+  assert(handoff.DEFAULT_SEAT_CLASS === "standard_only", "기본 좌석등급이 일반실만이 아니다");
+  assert(handoff.parseSeatClass("standard_preferred") === null, "쓰지 않는 좌석등급 값을 받아들인다");
+
+  // 화면이 출처를 드러내는지.
+  const panel = read("components/autobook-panel.tsx");
+  assert(/data-train-source=\{train\.source\}/.test(panel), "등록 화면이 열차 출처를 표시하지 않는다");
+  assert(/가상 열차/.test(panel), "데모 열차 표시가 없다");
+});
+
 check("작업 생성 API 가 없다", () => {
   const apiDir = path.join(ROOT, "app/api/autobook");
   const routes = walkDir("app/api/autobook").filter((f) => /route\.(ts|tsx)$/.test(f));
@@ -589,7 +637,7 @@ const result = {
   passed: checks.length,
   failed: failures.length,
   networkCalls: 0,
-  note: "소스 검사만 수행한다. 실제 연동 검증이 아니다(공식 Provider 는 Stub).",
+  note: "소스 검사와 순수 함수 실행만 수행한다. 네트워크·브라우저를 쓰지 않으며, 실제 연동 검증이 아니다(공식 Provider 는 Stub).",
 };
 if (failures.length > 0) result.failures = failures;
 console.log(JSON.stringify(result));

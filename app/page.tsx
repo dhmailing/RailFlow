@@ -29,6 +29,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster } from "@/components/ui/sonner";
 import { stationNames } from "@/lib/rail/stations";
 import type { RailProviderMode, TrainResult, TrainSearchResponse } from "@/lib/rail/types";
+import {
+  buildAutobookHandoff,
+  DEFAULT_SEAT_CLASS,
+  parseSeatClass,
+  restoreCandidates,
+  type AutobookSeatClass,
+  type StoredCandidate,
+} from "@/lib/autobook/handoff";
 import type { AuthUser } from "@/components/auth-panel";
 import { toast } from "sonner";
 
@@ -36,17 +44,9 @@ import { toast } from "sonner";
 // 순수 선택 상태이며, 실제 감시는 자동예약 탭에서 조건을 등록해야 시작된다.
 // conditionKey는 이 후보가 어느 검색 조건(구간·날짜)에서 고른 것인지를 들고
 // 있어, 검색 조건이 바뀌면 오래된 후보가 남지 않도록 걸러내는 데 쓴다.
-type CandidateSelection = {
-  id: string;
-  number: string;
-  trainType: string;
-  depart: string;
-  arrive: string;
-  fare: string;
-  departure: string;
-  arrival: string;
-  date: string;
-};
+//
+// 모양과 복원 규칙은 lib/autobook/handoff.ts 에 있다. 특히 `source`(실제
+// 시간표인지 데모인지)는 선택 → 저장 → 등록 화면까지 끝까지 함께 간다.
 
 function conditionKeyOf(departure: string, arrival: string, date: string) {
   return `${departure}|${arrival}|${date}`;
@@ -102,7 +102,13 @@ export default function Home() {
   const [providerMode, setProviderMode] = useState<RailProviderMode | "checking">("checking");
   const [resultMode, setResultMode] = useState<RailProviderMode>("demo");
   const [sourceLabel, setSourceLabel] = useState("연결 상태 확인 중");
-  const [selectedCandidates, setSelectedCandidates] = useState<CandidateSelection[]>([]);
+  const [selectedCandidates, setSelectedCandidates] = useState<StoredCandidate[]>([]);
+  // 좌석등급은 **예약 조건**이므로 자동예약 패널 내부가 아니라 여기서 든다.
+  // 패널은 탭을 옮길 때 언마운트되므로 패널 안에 두면 왕복 한 번에
+  // 사용자가 고른 값이 사라진다.
+  const [seatClass, setSeatClass] = useState<AutobookSeatClass>(DEFAULT_SEAT_CLASS);
+  // 출처를 확인할 수 없어 버린 옛 후보 수. 재선택을 안내하는 데만 쓴다.
+  const [unknownSourceDropped, setUnknownSourceDropped] = useState(0);
   const [notifications, setNotifications] = useState(true);
   const [autoLogin, setAutoLogin] = useState(true);
   const [autoPay, setAutoPay] = useState(false);
@@ -149,19 +155,13 @@ export default function Home() {
       try {
         const saved = window.localStorage.getItem(storageKey);
         if (saved) {
-          // 구버전(railflow-reservations)의 "가짜 예약" 항목이 남아 있을 수
-          // 있으므로, 현재 후보 모델의 필수 필드를 모두 갖춘 항목만 복원한다.
-          const parsed: unknown = JSON.parse(saved);
-          if (Array.isArray(parsed)) {
-            setSelectedCandidates(
-              parsed.filter((item): item is CandidateSelection =>
-                !!item && typeof item === "object" &&
-                typeof (item as CandidateSelection).id === "string" &&
-                typeof (item as CandidateSelection).departure === "string" &&
-                typeof (item as CandidateSelection).arrival === "string" &&
-                typeof (item as CandidateSelection).date === "string",
-              ),
-            );
+          // 구버전의 "가짜 예약" 항목, 그리고 **출처(source)가 없는** 옛
+          // 후보가 남아 있을 수 있다. 출처가 없는 항목은 데모였는지 실제
+          // 시간표였는지 알 수 없으므로 실제 후보로 추정하지 않고 버린다.
+          const restored = restoreCandidates(JSON.parse(saved) as unknown);
+          setSelectedCandidates(restored.candidates);
+          if (restored.droppedUnknownSource > 0) {
+            setUnknownSourceDropped(restored.droppedUnknownSource);
           }
         }
         const savedSettings = window.localStorage.getItem(settingsKey);
@@ -170,6 +170,9 @@ export default function Home() {
           setNotifications(settings.notifications ?? true);
           setAutoLogin(settings.autoLogin ?? true);
           setAutoPay(settings.autoPay ?? false);
+          // 저장된 값이 깨졌거나 없으면 기본값(일반실만)으로 둔다. 사용자가
+          // 고르지 않은 "특실 허용"으로 올라가지 않게 한다.
+          setSeatClass(parseSeatClass(settings.seatClass) ?? DEFAULT_SEAT_CLASS);
         }
       } catch {
         window.localStorage.removeItem(storageKey);
@@ -197,8 +200,8 @@ export default function Home() {
   useEffect(() => {
     if (!storageReady) return;
     window.localStorage.setItem(storageKey, JSON.stringify(selectedCandidates));
-    window.localStorage.setItem(settingsKey, JSON.stringify({ notifications, autoLogin, autoPay }));
-  }, [selectedCandidates, notifications, autoLogin, autoPay, storageReady]);
+    window.localStorage.setItem(settingsKey, JSON.stringify({ notifications, autoLogin, autoPay, seatClass }));
+  }, [selectedCandidates, notifications, autoLogin, autoPay, seatClass, storageReady]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -339,6 +342,8 @@ export default function Home() {
           departure: conditionDeparture,
           arrival: conditionArrival,
           date: conditionDate,
+          // 출처를 여기서 놓치면 이후 어느 화면도 되살릴 수 없다.
+          source: train.source,
         },
       ];
     });
@@ -541,6 +546,17 @@ export default function Home() {
                 </div>
 
                 <div className="min-w-0 space-y-3">
+                  {unknownSourceDropped > 0 && (
+                    <div
+                      data-testid="candidate-unknown-source-note"
+                      role="status"
+                      className="rounded-2xl border border-amber-400/30 bg-amber-400/[0.07] p-4 text-xs leading-5 text-amber-200/90"
+                    >
+                      이전에 저장된 자동예약 후보 {unknownSourceDropped}편은 <strong>실제 시간표에서 고른 것인지 데모에서 고른
+                      것인지 확인할 수 없어</strong> 비웠습니다. 데모 열차가 실제 작업으로 섞여 들어가지 않도록 추정하지
+                      않습니다. 열차를 다시 검색해 후보를 선택해 주세요.
+                    </div>
+                  )}
                   {selectedCandidates.length > 0 && (
                     <div data-testid="candidate-tray" className="rounded-2xl border border-[#ff8a1f]/30 bg-[#ff8a1f]/[0.07] p-4">
                       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -562,8 +578,18 @@ export default function Home() {
                       <ul className="mt-3 space-y-1.5">
                         {selectedCandidates.map((candidate) => (
                           <li key={candidate.id} className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/25 px-3 py-2 text-xs">
-                            <span className="min-w-0 truncate text-white/70">
-                              {candidate.number} · {candidate.depart} 출발 · {candidate.departure}→{candidate.arrival} · {candidate.date}
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              {candidate.source === "demo" && (
+                                <span
+                                  data-testid="candidate-source-demo"
+                                  className="shrink-0 rounded-full bg-[#ff8a1f]/15 px-1.5 py-0.5 text-[10px] font-bold text-[#ffad62]"
+                                >
+                                  가상 열차
+                                </span>
+                              )}
+                              <span className="min-w-0 truncate text-white/70">
+                                {candidate.number} · {candidate.depart} 출발 · {candidate.departure}→{candidate.arrival} · {candidate.date}
+                              </span>
                             </span>
                             <Button
                               type="button"
@@ -614,22 +640,8 @@ export default function Home() {
                         그대로 넘긴다. 등록은 여전히 막혀 있고, 패널이 그 사유를
                         표시한다. 넘어온 값을 "진행 중인 작업"으로 보여주지 않는다. */}
                     <AutobookPanel
-                      handoff={
-                        selectedCandidates.length > 0
-                          ? {
-                              departure: selectedCandidates[0].departure,
-                              arrival: selectedCandidates[0].arrival,
-                              date: selectedCandidates[0].date,
-                              passengers,
-                              trains: selectedCandidates.map((candidate) => ({
-                                number: candidate.number,
-                                trainType: candidate.trainType,
-                                depart: candidate.depart,
-                                arrive: candidate.arrive,
-                              })),
-                            }
-                          : null
-                      }
+                      handoff={buildAutobookHandoff({ candidates: selectedCandidates, passengers, seatClass })}
+                      onSeatClassChange={setSeatClass}
                     />
                   </div>
                   <div className="mx-auto max-w-3xl border-t border-white/10 pt-6">
