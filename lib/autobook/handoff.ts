@@ -9,9 +9,9 @@
 // 그 경계를 문자열 검사가 아니라 함수로 못박고 테스트한다.
 
 import type { SeatClassPreference } from "@/lib/autobook/types";
+import { parseCandidateSource, type CandidateSource } from "@/lib/rail/candidate-source";
 
-/** 후보 열차가 어디서 온 값인지. 끝까지 함께 옮긴다. */
-export type CandidateSource = "demo" | "tago";
+export type { CandidateSource };
 
 /**
  * 좌석등급. `lib/autobook/types.ts` 의 `SeatClassPreference` 와 **같은 값
@@ -68,10 +68,6 @@ export type AutobookHandoff = {
   trains: AutobookHandoffTrain[];
 };
 
-function parseSource(value: unknown): CandidateSource | null {
-  return value === "demo" || value === "tago" ? value : null;
-}
-
 export type RestoredCandidates = {
   candidates: StoredCandidate[];
   /**
@@ -108,7 +104,7 @@ export function restoreCandidates(raw: unknown): RestoredCandidates {
       droppedInvalid += 1;
       continue;
     }
-    const source = parseSource(row.source);
+    const source = parseCandidateSource(row.source);
     if (!source) {
       droppedUnknownSource += 1;
       continue;
@@ -163,11 +159,18 @@ export function simulatedTrains(handoff: AutobookHandoff | null): AutobookHandof
 export type RegistrationGate = { ok: false; reason: string } | { ok: true };
 
 /**
- * 데모 후보가 실제 작업으로 들어가는 것을 막는 경계.
+ * 데모 후보를 실제 작업에서 걸러내기 위한 판정 함수.
  *
- * 지금은 등록 경로 자체가 없어 호출될 일이 없다. 그래도 여기에 두는 이유는,
- * 나중에 등록 경로가 열릴 때 **이 함수를 지나지 않고는 작업을 만들 수 없게**
- * 하려는 것이다. 호출자가 생기면 테스트가 먼저 이 경계를 붙든다.
+ * **지금 아무 등록 경로에도 적용되어 있지 않다.** 호출자가 없는 준비 코드다.
+ * 서버형 자동예약에는 작업 생성 경로 자체가 없고(`app/api/autobook/` 는 읽기
+ * 전용), 이 함수가 어떤 요청도 막고 있지 않다. "이 함수를 지나지 않고는
+ * 작업을 만들 수 없다"고 말할 수 있는 상태가 아니다.
+ *
+ * 그럼에도 먼저 두는 이유는 판정 기준을 테스트와 함께 고정해 두려는 것이다.
+ * 등록 경로를 만드는 변경에서 **호출을 추가해야** 효력이 생긴다.
+ *
+ * 실제로 지금 적용되고 있는 출처 검증은 다른 곳에 있다:
+ * `app/api/watch-jobs/route.ts` 가 `checkSourceConsistency()` 로 요청을 거부한다.
  */
 export function gateHandoffForRealRegistration(handoff: AutobookHandoff | null): RegistrationGate {
   if (!handoff || handoff.trains.length === 0) {
@@ -182,4 +185,41 @@ export function gateHandoffForRealRegistration(handoff: AutobookHandoff | null):
     };
   }
   return { ok: true };
+}
+
+
+// --- 기존 감시(v0.5) 경로와의 좌석등급 대응 -------------------------------
+
+/**
+ * `lib/watch/types.ts` 의 `SeatClassPreference`. 값 집합이 서버형과 다르다.
+ *  - 서버형(autobook): `standard_only` | `first_only` | `any`
+ *  - 감시(watch):     `standard_only` | `standard_preferred` | `any`
+ */
+export type WatchSeatClass = "standard_only" | "standard_preferred" | "any";
+
+export type WatchSeatClassMapping =
+  | { ok: true; value: WatchSeatClass }
+  | { ok: false; reason: string };
+
+/**
+ * 서버형 좌석등급을 감시 경로의 값으로 옮긴다.
+ *
+ * **조건을 넓히지 않는다.** `first_only`(특실만)에 대응하는 감시 값이 없다 —
+ * `any` 로 바꾸면 사용자가 허용하지 않은 일반실까지 허용하는 것이고,
+ * `standard_preferred` 로 바꾸면 일반실을 우선하게 되어 뜻이 뒤집힌다. 그래서
+ * 조용히 바꾸지 않고 **대응 불가로 알리고 등록을 막는다.**
+ */
+export function mapToWatchSeatClass(value: AutobookSeatClass): WatchSeatClassMapping {
+  switch (value) {
+    case "standard_only":
+      return { ok: true, value: "standard_only" };
+    case "any":
+      return { ok: true, value: "any" };
+    case "first_only":
+      return {
+        ok: false,
+        reason:
+          "취소표 감시 경로에는 '특실만' 조건이 없습니다. 조건을 넓히지 않기 위해 등록을 막습니다. 좌석등급을 '일반실만' 또는 '일반실·특실 모두 허용'으로 바꾸거나, 서버형 자동예약 경로를 사용하세요.",
+      };
+  }
 }

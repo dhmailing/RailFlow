@@ -170,3 +170,111 @@ test("저장된 좌석등급이 알 수 없는 값이면 일반실만으로 돌�
 
   await expect(page.getByTestId("autobook-seat-class")).toHaveValue("standard_only");
 });
+
+// --- 자동예약 탭의 두 패널 사이 ------------------------------------------
+//
+// 같은 탭에 서버형 자동예약 패널과 취소표 감시 패널이 함께 있다. 조건이 한
+// 쪽에만 전달되면 사용자는 같은 화면에서 서로 다른 조건을 보게 된다.
+
+// 감시 패널의 등록 폼은 로그인한 사용자에게만 보인다. 개발/테스트 전용
+// 메모리 계정 저장소로 가입한다(playwright.config.ts 의 AUTH_STORE=memory).
+async function signIn(page: import("@playwright/test").Page) {
+  const response = await page.request.post("/api/auth/signup", {
+    // 요청 제한 버킷을 테스트마다 분리한다(lib/security/rate-limit.ts).
+    // 제한 회피가 아니라 테스트 독립을 위한 것이다.
+    headers: { "x-forwarded-for": `198.51.100.${Math.floor(Math.random() * 250) + 1}` },
+    data: { email: `panel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.test`, password: "two-panel-1234" },
+  });
+  if (response.status() !== 201) throw new Error(`가입 실패: ${response.status()} ${await response.text()}`);
+}
+
+async function waitForWatchPanel(page: import("@playwright/test").Page) {
+  await page.getByTestId("watch-seat-class").waitFor();
+}
+
+test("같은 후보의 출처가 두 패널에서 일치한다", async ({ page }) => {
+  await seed(page, [candidate({ id: "demo-1", source: "demo" })]);
+  await signIn(page);
+  await page.goto("/");
+  await openAutomationTab(page);
+  await waitForWatchPanel(page);
+
+  // 서버형 패널
+  await expect(page.getByTestId("autobook-handoff-train").first()).toHaveAttribute("data-train-source", "demo");
+  // 감시 패널의 후보 줄
+  await expect(page.getByTestId("watch-candidate-source").first()).toHaveAttribute("data-train-source", "demo");
+  await expect(page.getByTestId("watch-candidate-source").first()).toContainText("가상 열차");
+});
+
+test("실제 시간표 후보도 두 패널에서 같은 출처로 보인다", async ({ page }) => {
+  await seed(page, [candidate({ id: "real-1", source: "tago" })]);
+  await signIn(page);
+  await page.goto("/");
+  await openAutomationTab(page);
+  await waitForWatchPanel(page);
+
+  await expect(page.getByTestId("autobook-handoff-train").first()).toHaveAttribute("data-train-source", "tago");
+  await expect(page.getByTestId("watch-candidate-source").first()).toHaveAttribute("data-train-source", "tago");
+  // 감시 경로는 실제 좌석을 조회하지 않으므로 등록을 막는다.
+  await expect(page.getByTestId("watch-blocked-reason")).toBeVisible();
+  await expect(page.getByTestId("watch-create-job")).toBeDisabled();
+});
+
+test("좌석등급이 두 패널에서 같은 값을 보인다", async ({ page }) => {
+  await seed(page, [candidate({ source: "demo" })]);
+  await signIn(page);
+  await page.goto("/");
+  await openAutomationTab(page);
+  await waitForWatchPanel(page);
+
+  // 기본값
+  await expect(page.getByTestId("autobook-seat-class")).toHaveValue("standard_only");
+  await expect(page.getByTestId("watch-seat-class")).toHaveValue("standard_only");
+
+  // 감시 패널에서 바꾸면 서버형 패널도 따라온다.
+  await page.getByTestId("watch-seat-class").selectOption("any");
+  await expect(page.getByTestId("autobook-seat-class")).toHaveValue("any");
+  await expect(page.getByTestId("autobook-seat-class-value")).toHaveText("일반실·특실 모두 허용");
+
+  // 서버형 패널에서 되돌리면 감시 패널도 따라온다.
+  await page.getByTestId("autobook-seat-class").selectOption("standard_only");
+  await expect(page.getByTestId("watch-seat-class")).toHaveValue("standard_only");
+});
+
+test("일반실만 선택이 다른 패널에서 특실 허용으로 바뀌지 않는다", async ({ page }) => {
+  await seed(page, [candidate({ source: "demo" })]);
+  await signIn(page);
+  await page.goto("/");
+  await openAutomationTab(page);
+  await waitForWatchPanel(page);
+
+  await page.getByTestId("autobook-seat-class").selectOption("standard_only");
+  await openBookingTab(page);
+  await openAutomationTab(page);
+  await waitForWatchPanel(page);
+
+  await expect(page.getByTestId("watch-seat-class")).toHaveValue("standard_only");
+  const watchValue = await page.getByTestId("watch-seat-class").inputValue();
+  expect(watchValue, "일반실만이 특실 허용으로 바뀌었다").not.toBe("any");
+  expect(watchValue).not.toBe("standard_preferred");
+  await expect(page.getByTestId("watch-blocked-reason")).toHaveCount(0);
+});
+
+test("감시 경로가 지원하지 않는 좌석등급은 조용히 대체되지 않고 등록이 막힌다", async ({ page }) => {
+  await seed(page, [candidate({ source: "demo" })]);
+  await signIn(page);
+  await page.goto("/");
+  await openAutomationTab(page);
+  await waitForWatchPanel(page);
+
+  await page.getByTestId("autobook-seat-class").selectOption("first_only");
+
+  // 감시 패널이 값을 다른 등급으로 바꿔 보여주지 않는다.
+  await expect(page.getByTestId("watch-seat-class")).toHaveValue("first_only");
+  await expect(page.getByTestId("watch-seat-class-unsupported")).toBeVisible();
+  await expect(page.getByTestId("watch-seat-class-unsupported")).toContainText("특실만");
+  await expect(page.getByTestId("watch-create-job")).toBeDisabled();
+
+  // 서버형 패널의 표시도 그대로 특실만이다.
+  await expect(page.getByTestId("autobook-seat-class-value")).toHaveText("특실만");
+});

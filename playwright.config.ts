@@ -52,6 +52,13 @@ export default defineConfig({
       // the authenticated /api/automation-jobs/** path, not by the public
       // /demo/booking-automation page.
       AUTH_STORE: "memory",
+      // v0.5 취소표 감시 경로의 서버 입력 검증(후보 출처 일관성)을 요청으로
+      // 확인하는 테스트가 있다. 이 플래그가 없으면 라우트가 검증에 닿기 전에
+      // 503 으로 끝난다. 모두 개발/테스트 전용이며 Production 에서는
+      // lib/watch/feature-flags.ts 가 별도로 막는다.
+      SEAT_AVAILABILITY_PROVIDER: "mock",
+      ENABLE_SEAT_WATCH_JOBS: "true",
+      WATCH_STORE: "memory",
       PLAYWRIGHT_CHROMIUM_PATH: CHROMIUM_EXECUTABLE_PATH,
       AUTOMATION_TARGET_BASE_URL: BASE_URL,
     },

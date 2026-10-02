@@ -616,8 +616,13 @@ export default function Home() {
             <TabsContent value="automation" className="m-0">
               {activeTab === "automation" && (
                 <div className="space-y-8">
+                  {/* 좌석등급은 두 패널이 같은 상태를 쓴다. 후보의 출처(실제 시간표
+                      /데모)도 함께 넘긴다 -- 여기서 빠뜨리면 데모 열차가 감시
+                      작업으로 조용히 등록된다. */}
                   <WatchJobsPanel
                     user={authUser}
+                    seatClass={seatClass}
+                    onSeatClassChange={setSeatClass}
                     prefill={
                       selectedCandidates.length > 0
                         ? {
@@ -629,6 +634,7 @@ export default function Home() {
                               trainNumber: candidate.number,
                               departAt: candidate.depart,
                               arriveAt: candidate.arrive,
+                              source: candidate.source,
                             })),
                           }
                         : null

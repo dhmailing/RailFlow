@@ -172,7 +172,7 @@ function baseJobInput(overrides = {}) {
     trainType: 'KTX',
     passengers: 1,
     seatClassPreference: 'standard_preferred',
-    candidates: [{ externalKey: 'cand-1', trainNumber: 'KTX 101', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }],
+    candidates: [{ externalKey: 'cand-1', source: 'demo', trainNumber: 'KTX 101', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }],
     watchUntil: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
     notificationMethods: [],
     ...overrides,
@@ -468,35 +468,77 @@ async function main() {
 
     const dupExternalKey = await create(
       [
-        { externalKey: 'dup', trainNumber: 'KTX 1', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' },
-        { externalKey: 'dup', trainNumber: 'KTX 2', trainType: 'KTX', departAt: '2026-09-26T11:00:00+09:00', arriveAt: '2026-09-26T13:00:00+09:00' },
+        { externalKey: 'dup', source: 'demo', trainNumber: 'KTX 1', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' },
+        { externalKey: 'dup', source: 'demo', trainNumber: 'KTX 2', trainType: 'KTX', departAt: '2026-09-26T11:00:00+09:00', arriveAt: '2026-09-26T13:00:00+09:00' },
       ],
       'block-cand-dup',
     );
     assert.equal(dupExternalKey.status, 400);
     assert.equal((await dupExternalKey.json()).error.code, 'INVALID_CANDIDATE');
 
-    const wrongDate = await create([{ externalKey: 'wrong-date', trainNumber: 'KTX 3', trainType: 'KTX', departAt: '2026-09-27T10:00:00+09:00', arriveAt: '2026-09-27T12:00:00+09:00' }], 'block-cand-date');
+    const wrongDate = await create([{ externalKey: 'wrong-date', source: 'demo', trainNumber: 'KTX 3', trainType: 'KTX', departAt: '2026-09-27T10:00:00+09:00', arriveAt: '2026-09-27T12:00:00+09:00' }], 'block-cand-date');
     assert.equal(wrongDate.status, 400);
     assert.equal((await wrongDate.json()).error.code, 'INVALID_CANDIDATE');
 
-    const outsideRange = await create([{ externalKey: 'outside-range', trainNumber: 'KTX 4', trainType: 'KTX', departAt: '2026-09-26T05:00:00+09:00', arriveAt: '2026-09-26T07:00:00+09:00' }], 'block-cand-range');
+    const outsideRange = await create([{ externalKey: 'outside-range', source: 'demo', trainNumber: 'KTX 4', trainType: 'KTX', departAt: '2026-09-26T05:00:00+09:00', arriveAt: '2026-09-26T07:00:00+09:00' }], 'block-cand-range');
     assert.equal(outsideRange.status, 400);
     assert.equal((await outsideRange.json()).error.code, 'INVALID_CANDIDATE');
 
-    const backwardsTime = await create([{ externalKey: 'backwards', trainNumber: 'KTX 5', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T09:00:00+09:00' }], 'block-cand-backwards');
+    const backwardsTime = await create([{ externalKey: 'backwards', source: 'demo', trainNumber: 'KTX 5', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T09:00:00+09:00' }], 'block-cand-backwards');
     assert.equal(backwardsTime.status, 400);
     assert.equal((await backwardsTime.json()).error.code, 'INVALID_CANDIDATE');
 
     // A valid set still succeeds, and a client-supplied "id" is ignored -- the
     // server always generates its own UUID.
-    const validCreate = await create([{ id: 'client-supplied-fake-id', externalKey: 'valid-1', trainNumber: 'KTX 6', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }], 'block-cand-valid');
+    const validCreate = await create([{ id: 'client-supplied-fake-id', externalKey: 'valid-1', source: 'demo', trainNumber: 'KTX 6', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }], 'block-cand-valid');
     assert.equal(validCreate.status, 201);
     const validJob = (await validCreate.json()).job;
     const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     assert.ok(uuidRe.test(validJob.candidates[0].id));
     assert.notEqual(validJob.candidates[0].id, 'client-supplied-fake-id', 'candidate.id must never be client-controlled');
     assert.equal(validJob.candidates[0].externalKey, 'valid-1');
+    assert.equal(validJob.candidates[0].source, 'demo', '후보 출처가 작업에 남지 않았다');
+
+    // --- 후보 출처 검증 (입력 일관성. 실제 열차의 진위 검증이 아니다) ---
+    // lib/rail/candidate-source.ts 머리말 참고.
+    const noSource = await create([{ externalKey: 'no-source', trainNumber: 'KTX 7', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }], 'block-cand-nosource');
+    assert.equal(noSource.status, 400, '출처 없는 후보가 통과했다');
+    assert.equal((await noSource.json()).error.code, 'INVALID_JOB_INPUT');
+
+    const badSource = await create([{ externalKey: 'bad-source', source: 'korail', trainNumber: 'KTX 8', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }], 'block-cand-badsource');
+    assert.equal(badSource.status, 400, '알 수 없는 출처가 통과했다');
+
+    // 데모 역 ID 작업에 실제 시간표 후보를 섞을 수 없다.
+    const mixedSource = await create(
+      [
+        { externalKey: 'm-1', source: 'demo', trainNumber: 'KTX 9', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' },
+        { externalKey: 'm-2', source: 'tago', trainNumber: 'KTX 10', trainType: 'KTX', departAt: '2026-09-26T11:00:00+09:00', arriveAt: '2026-09-26T13:00:00+09:00' },
+      ],
+      'block-cand-mixed',
+    );
+    assert.equal(mixedSource.status, 400, '출처가 섞인 작업이 통과했다');
+    assert.equal((await mixedSource.json()).error.code, 'INVALID_CANDIDATE_SOURCE');
+
+    // 시연 시나리오는 데모 후보에만 붙을 수 있다.
+    const scenarioOnReal = await create([{ externalKey: 'sc-1', source: 'tago', trainNumber: 'KTX 11', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00', mockScenario: 'no_seat_ever' }], 'block-cand-scenario');
+    assert.equal(scenarioOnReal.status, 400, '실제 후보에 시연 시나리오가 붙었다');
+
+    // 실제 시간표 후보는 이 경로로 등록할 수 없다 -- 실제 좌석 Provider 가 없다.
+    const realSource = await watchJobsRoute.POST(
+      req('http://test/api/watch-jobs', {
+        method: 'POST',
+        body: baseJobInput({
+          departureId: 'NAT010000',
+          arrivalId: 'NAT014445',
+          candidates: [{ externalKey: 'real-1', source: 'tago', trainNumber: 'KTX 12', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00' }],
+          notificationMethods: [{ channel: 'fcm', deviceId: device.id }],
+        }),
+        cookie: user.cookie,
+        clientId: 'block-cand-real',
+      }),
+    );
+    assert.equal(realSource.status, 422, '실제 시간표 후보가 가상 감시 경로로 등록됐다');
+    assert.equal((await realSource.json()).error.code, 'REAL_SOURCE_UNSUPPORTED');
   });
 
   // === §6 검토사항: 멱등키(channel+deviceId+watchCycle), 다중 채널/기기, 미확인 수신처 스킵, 재감시 후 새 알림 ===
@@ -517,8 +559,8 @@ async function main() {
         body: baseJobInput({
           timeRangeStart: '07:00',
           candidates: [
-            { externalKey: 'never', trainNumber: 'KTX 900', trainType: 'KTX', departAt: '2026-09-26T08:00:00+09:00', arriveAt: '2026-09-26T10:00:00+09:00', mockScenario: 'no_seat_ever' },
-            { externalKey: 'appears', trainNumber: 'KTX 901', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00', mockScenario: 'seat_after_one_check' },
+            { externalKey: 'never', source: 'demo', trainNumber: 'KTX 900', trainType: 'KTX', departAt: '2026-09-26T08:00:00+09:00', arriveAt: '2026-09-26T10:00:00+09:00', mockScenario: 'no_seat_ever' },
+            { externalKey: 'appears', source: 'demo', trainNumber: 'KTX 901', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00', mockScenario: 'seat_after_one_check' },
           ],
           notificationMethods: [
             { channel: 'fcm', deviceId: fcmDevice.id },
@@ -643,7 +685,7 @@ async function main() {
     resetAll();
     const user = await signup('err@example.com', 'block-err');
     const jobId = watchStore.createWatchJob(
-      { ...baseJobInput(), userId: user.user.id, candidates: [{ externalKey: 'x', trainNumber: 'KTX 2', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00', mockScenario: 'error_on_check' }] },
+      { ...baseJobInput(), userId: user.user.id, candidates: [{ externalKey: 'x', source: 'demo', trainNumber: 'KTX 2', trainType: 'KTX', departAt: '2026-09-26T10:00:00+09:00', arriveAt: '2026-09-26T12:00:00+09:00', mockScenario: 'error_on_check' }] },
       'mock',
     ).id;
     const worker = load('lib/watch/worker.ts');
