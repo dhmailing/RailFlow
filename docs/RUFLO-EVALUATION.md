@@ -61,6 +61,14 @@
 
 `.claude-flow/` 는 그대로 두었다 — Claude Code 가 읽는 경로가 아니다.
 
+**(2026-10-02 추가) 이 브랜치의 설정은 작업 브랜치로 자동 복제되지 않는다.**
+`.mcp.json`·`.claude/`·`tools/ruflo-runtime/{package.json,package-lock.json}` 은
+`chore/ruflo-evaluation` 에만 커밋돼 있다. 다른 브랜치(예:
+`feature/autobook-team-dev`)에서 쓰려면 `git show chore/ruflo-evaluation:<path>`
+로 작업 트리에 **미추적 복사본**을 꺼내 쓴다. 그 복사본은 이 브랜치의 설정이
+바뀌어도 **자동으로 갱신되지 않는다** — 설정을 고쳤으면 각 작업 트리에서 다시
+꺼내야 한다.
+
 이렇게 둔 이유는 §아래의 권한 범위 때문이다. 다시 켜려면 두 경로를 원래
 이름으로 되돌리면 된다.
 
