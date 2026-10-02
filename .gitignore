@@ -55,3 +55,4 @@ next-env.d.ts
 ruvector.db
 .swarm/
 tools/ruflo-runtime/node_modules/
+.claude-flow/
