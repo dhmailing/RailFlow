@@ -29,6 +29,22 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+// check() 는 동기 함수만 다룬다. async 검사를 그대로 넘기면 반환된 Promise 를
+// 아무도 기다리지 않아 실패가 조용히 사라진다. 그래서 따로 모아 끝에서 기다린다.
+const pending = [];
+function checkAsync(name, fn) {
+  pending.push(
+    Promise.resolve()
+      .then(fn)
+      .then(() => {
+        checks.push(name);
+      })
+      .catch((error) => {
+        failures.push(`${name}: ${error.message}`);
+      }),
+  );
+}
+
 /** 디렉터리 안의 파일 경로를 전부 모은다. */
 function walkDir(dir, out = []) {
   for (const entry of fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true })) {
@@ -628,14 +644,106 @@ check("상태 API 가 읽기 전용이다", () => {
   assert(!/export async function (POST|PUT|DELETE|PATCH)/.test(route), "상태 변경 메서드가 있다");
 });
 
+// --- 9. 런타임 불변성 (T9) --------------------------------------------------
+// 소스 문자열 검사는 `available: true` 같은 글자만 본다. 런타임에 공유 객체를
+// 변조하는 경로는 잡지 못하므로, 실제로 모듈을 불러 변조를 시도해 본다.
+// 네트워크에 나가지 않고 브라우저도 띄우지 않는다.
+const { load } = require("../tests/e2e/load-ts.cjs");
+
+check("[런타임] 계정 연결 가용성을 변조할 수 없다", () => {
+  const link = load("lib/autobook/account-link.ts");
+  const attempts = [
+    () => { link.METHOD_AVAILABILITY.official_oauth.available = true; },
+    () => { link.METHOD_AVAILABILITY.official_api_credential.available = true; },
+    () => { link.METHOD_AVAILABILITY.short_lived_session.available = true; },
+    () => { Object.assign(link.METHOD_AVAILABILITY.official_oauth, { available: true }); },
+    () => { link.accountLinkAvailability().anyAvailable = true; },
+    () => { link.accountLinkAvailability().methods[0].available = true; },
+  ];
+  for (const attempt of attempts) {
+    try {
+      attempt();
+    } catch {
+      // strict mode 의 TypeError. 막혔다는 뜻이므로 통과다.
+    }
+  }
+  assert(
+    link.accountLinkAvailability().anyAvailable === false,
+    "변조로 계정 연결이 가능하다고 표시된다",
+  );
+  for (const method of Object.keys(link.METHOD_AVAILABILITY)) {
+    assert(
+      link.METHOD_AVAILABILITY[method].available === false,
+      `${method}: 변조로 활성화됐다`,
+    );
+  }
+});
+
+check("[런타임] 요청 제한 정책을 변조할 수 없다", () => {
+  const { getRateLimitPolicy } = load("lib/autobook/rate-limit.ts");
+  const expected = {
+    "mock-server": 1,
+    "official-approved (stub)": 60,
+    unavailable: 3600,
+    "없는-이름": 300, // FALLBACK
+  };
+  for (const name of Object.keys(expected)) {
+    const policy = getRateLimitPolicy(name);
+    try {
+      policy.minIntervalSeconds = 1;
+    } catch {
+      /* 막혔다 */
+    }
+    try {
+      policy.backoffSeconds[0] = 1;
+    } catch {
+      /* 막혔다 */
+    }
+    try {
+      policy.maxConsecutiveFailures = 9999;
+    } catch {
+      /* 막혔다 */
+    }
+    const after = getRateLimitPolicy(name);
+    assert(
+      after.minIntervalSeconds === expected[name],
+      `${name}: 최소 간격이 ${after.minIntervalSeconds} 로 변조됐다(기대 ${expected[name]})`,
+    );
+    assert(Object.isFrozen(after), `${name}: 정책이 freeze 되지 않았다`);
+    assert(Object.isFrozen(after.backoffSeconds), `${name}: backoffSeconds 가 freeze 되지 않았다`);
+  }
+});
+
+checkAsync("[런타임] 변조 뒤에도 계정 연결은 거절된다", async () => {
+  const link = load("lib/autobook/account-link.ts");
+  const store = link.createMemoryAccountLinkStore();
+  try {
+    link.METHOD_AVAILABILITY.official_oauth.available = true;
+  } catch {
+    /* 막혔다 */
+  }
+  for (const method of Object.keys(link.METHOD_AVAILABILITY)) {
+    let rejected = false;
+    try {
+      await store.beginLink({ userId: "verify", method });
+    } catch (error) {
+      rejected = error.code === "ACCOUNT_LINK_REQUIRED";
+    }
+    assert(rejected, `${method}: 연동이 거절되지 않았다`);
+  }
+});
+
 // --- 결과 -------------------------------------------------------------------
-const result = {
-  result: failures.length === 0 ? "PASS" : "FAIL",
-  passed: checks.length,
-  failed: failures.length,
-  networkCalls: 0,
-  note: "소스 검사만 수행한다. 실제 연동 검증이 아니다(공식 Provider 는 Stub).",
-};
-if (failures.length > 0) result.failures = failures;
-console.log(JSON.stringify(result));
-process.exit(failures.length === 0 ? 0 : 1);
+// 비동기 검사가 끝나기 전에 결과를 찍으면 실패를 놓친다.
+Promise.all(pending).then(() => {
+  const result = {
+    result: failures.length === 0 ? "PASS" : "FAIL",
+    passed: checks.length,
+    failed: failures.length,
+    networkCalls: 0,
+    note: "소스 검사와 일부 런타임 불변성 검사를 수행한다. 실제 연동 검증이 아니다(공식 Provider 는 Stub).",
+  };
+  if (failures.length > 0) result.failures = failures;
+  console.log(JSON.stringify(result));
+  process.exit(failures.length === 0 ? 0 : 1);
+});

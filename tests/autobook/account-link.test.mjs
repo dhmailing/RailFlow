@@ -280,50 +280,99 @@ test("입력으로 available 을 켜는 경로가 없다", async () => {
   assert.equal(accountLinkAvailability().anyAvailable, false);
 });
 
-// --- D. METHOD_AVAILABILITY 가 얕은 freeze 다 (현재 동작 기록) ------------
+// --- D. METHOD_AVAILABILITY 와 반환값이 완전히 불변이다 (F4 수정 검증) ---
 
-test("METHOD_AVAILABILITY 는 얕은 freeze 이고 중첩 값을 바꿀 수 있다(현재 동작 기록)", () => {
-  // Object.freeze 는 최상위만 막는다. 중첩된 방식 객체는 가변이므로
+test("METHOD_AVAILABILITY 는 중첩 값까지 불변이다(F4 수정 검증)", () => {
+  // T9. 이전에는 Object.freeze 가 최상위만 막아서
   // `METHOD_AVAILABILITY.official_oauth.available = true` 한 줄로
-  // accountLinkAvailability().anyAvailable 이 true 가 된다 -- 화면이
-  // "계정 연결 가능" 이라고 거짓을 말하게 된다.
+  // accountLinkAvailability().anyAvailable 이 true 가 됐다 -- 화면이
+  // "계정 연결 가능" 이라고 **거짓을 말했다.** 실제 연결은 beginLink 가
+  // 무조건 거절하므로 열리지 않았지만, 표시가 거짓인 것 자체가 결함이다.
   //
-  // **다만 실제 연결은 열리지 않는다.** beginLink 는 availability 와 무관하게
-  // 무조건 거절한다(위 테스트들이 그것을 붙들고 있다). 그래서 이것은
-  // "안전장치가 뚫린다"가 아니라 **"화면이 거짓을 말한다"** 범주다.
-  // scripts/verify-autobook.cjs 의 `available: true` 검사는 소스 문자열만
-  // 보므로 런타임 변경을 잡지 못한다.
-  //
-  // **이 테스트를 지우지 말고 뒤집어라.** 깊은 freeze 로 고치면 아래 단정이
-  // 깨진다. 그때 isFrozen 을 true 로, "바뀐다"를 "바뀌지 않는다"로 뒤집어라.
+  // **이 테스트를 지우지 말고 뒤집어라.** 근거는 이 파일 머리의 CLAUDE.md
+  // 목표 4번과 ADR 0003 이다. 계정 연결을 켜려면 테스트가 아니라 그 근거를
+  // 먼저 바꿔야 한다.
   assert.equal(Object.isFrozen(METHOD_AVAILABILITY), true, "최상위 freeze 가 사라졌다");
-  assert.equal(
-    Object.isFrozen(METHOD_AVAILABILITY.official_oauth),
-    false,
-    "중첩 객체가 frozen 이 됐다 — 고쳐졌다면 이 테스트를 뒤집어라",
-  );
-
-  const original = METHOD_AVAILABILITY.official_oauth.available;
-  try {
-    METHOD_AVAILABILITY.official_oauth.available = true;
+  for (const method of ALL_METHODS) {
     assert.equal(
-      accountLinkAvailability().anyAvailable,
+      Object.isFrozen(METHOD_AVAILABILITY[method]),
       true,
-      "중첩 변경이 번지지 않았다 — 방어가 추가됐다면 이 테스트를 뒤집어라",
+      `${method}: 중첩 객체가 freeze 되지 않았다`,
     );
-  } finally {
-    // 다른 테스트에 번지지 않게 되돌린다.
-    METHOD_AVAILABILITY.official_oauth.available = original;
   }
-  assert.equal(accountLinkAvailability().anyAvailable, false);
+
+  for (const mutate of [
+    () => { METHOD_AVAILABILITY.official_oauth.available = true; },
+    () => { METHOD_AVAILABILITY.official_api_credential.available = true; },
+    () => { METHOD_AVAILABILITY.short_lived_session.available = true; },
+    () => { METHOD_AVAILABILITY.official_oauth.blockedReason = ""; },
+    () => { Object.assign(METHOD_AVAILABILITY.official_oauth, { available: true }); },
+    () => { METHOD_AVAILABILITY.new_method = { available: true, blockedReason: "" }; },
+  ]) {
+    try {
+      mutate();
+    } catch {
+      // strict mode 에서는 TypeError 가 난다. 그것도 통과다.
+    }
+  }
+
+  for (const method of ALL_METHODS) {
+    assert.equal(METHOD_AVAILABILITY[method].available, false, `${method}: available 이 변조됐다`);
+    assert.ok(METHOD_AVAILABILITY[method].blockedReason.length > 0, `${method}: 사유가 지워졌다`);
+  }
+  assert.deepEqual(Object.keys(METHOD_AVAILABILITY).sort(), [...ALL_METHODS].sort(), "방식이 추가됐다");
+  assert.equal(accountLinkAvailability().anyAvailable, false, "화면이 계정 연결 가능이라고 말한다");
 });
 
-test("앞 테스트가 연동 가용성을 오염시키지 않았다(실행 순서 독립성)", () => {
-  // 위 테스트는 공유 객체를 일부러 변조한다. finally 로 되돌리지만,
-  // 되돌리기가 빠지거나 try 블록이 중간에 터지면 이후 테스트가 조용히
-  // 오염된 값을 본다. 안전 가드이므로 그 회귀를 반드시 잡는다.
-  assert.equal(accountLinkAvailability().anyAvailable, false, "앞 테스트의 변조가 남아 있다");
-  for (const method of ALL_METHODS) {
-    assert.equal(METHOD_AVAILABILITY[method].available, false, `${method}: 변조가 남아 있다`);
+test("accountLinkAvailability 의 반환값도 외부에서 바꿀 수 없다", () => {
+  // 화면은 이 반환값을 그대로 읽는다. 호출자가 반환값을 고쳐 "가능"으로
+  // 바꿀 수 있으면 표시가 거짓이 된다.
+  const availability = accountLinkAvailability();
+  assert.equal(Object.isFrozen(availability), true, "반환값이 freeze 되지 않았다");
+  assert.equal(Object.isFrozen(availability.methods), true, "methods 배열이 freeze 되지 않았다");
+  for (const entry of availability.methods) {
+    assert.equal(Object.isFrozen(entry), true, `${entry.method}: 항목이 freeze 되지 않았다`);
   }
+
+  for (const mutate of [
+    () => { availability.anyAvailable = true; },
+    () => { availability.summary = "계정 연결이 가능합니다"; },
+    () => { availability.methods[0].available = true; },
+    () => { availability.methods.push({ method: "x", available: true, blockedReason: "" }); },
+  ]) {
+    try {
+      mutate();
+    } catch {
+      /* 무시 */
+    }
+  }
+
+  const again = accountLinkAvailability();
+  assert.equal(again.anyAvailable, false, "반환값 변조가 표시를 바꿨다");
+  assert.equal(again.methods.length, 3, "방식 개수가 바뀌었다");
+  for (const entry of again.methods) {
+    assert.equal(entry.available, false, `${entry.method}: 가능으로 바뀌었다`);
+  }
+  assert.match(again.summary, /비밀번호를 입력받지도, 저장하지도 않습니다/, "안내 문구가 바뀌었다");
+});
+
+test("변조 시도 뒤에도 연동은 여전히 거절된다", async () => {
+  // 표시가 지켜지는 것과 별개로, 실제 연동 거절도 그대로여야 한다.
+  resetAccountLinkStore();
+  const store = createMemoryAccountLinkStore();
+  try {
+    METHOD_AVAILABILITY.official_oauth.available = true;
+  } catch {
+    /* 무시 */
+  }
+  for (const method of ALL_METHODS) {
+    await assert.rejects(
+      () => store.beginLink({ userId: "u1", method }),
+      (error) => {
+        assert.equal(error.code, "ACCOUNT_LINK_REQUIRED", `${method}: 변조 뒤 거절이 풀렸다`);
+        return true;
+      },
+    );
+  }
+  assert.equal((await store.getStatus("u1")).kind, "NOT_LINKED");
 });

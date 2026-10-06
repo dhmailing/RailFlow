@@ -58,43 +58,63 @@ test("모든 정책이 최소 불변식을 지킨다", () => {
   }
 });
 
-test("정책은 공유 참조이며 얕은 freeze 다(현재 동작 기록)", () => {
-  // POLICIES 는 Object.freeze 로 감싸져 있지만 **얕은** freeze 다. 중첩된
-  // 정책 객체와 backoffSeconds 배열은 가변이고, getRateLimitPolicy 는 사본이
-  // 아니라 공유 참조를 돌려준다. 그래서 호출자가 반환값을 고치면 프로세스
-  // 전체의 요청 제한이 영구히 바뀐다 -- 최소 간격을 1초로 낮추는 것까지
-  // 가능하다.
+test("반환된 정책은 완전히 불변이다(F3 수정 검증)", () => {
+  // T9. 이전에는 POLICIES 가 **얕은** freeze 여서, getRateLimitPolicy 가 돌려준
+  // 공유 참조를 호출자가 고치면 프로세스 전체의 요청 제한이 영구히 바뀌었다
+  // (최소 간격을 1초로 낮추는 것까지 가능했다). 지금은 정책 객체와
+  // backoffSeconds 배열까지 freeze 한다.
   //
-  // 지금 호출자는 둘 다 읽기만 한다(lib/autobook/worker.ts:63,
-  // app/api/autobook/status/route.ts:47). 그래서 잠재 결함이다. 제품 코드를
-  // 고치지 않기로 했으므로 **사실을 고정**해 둔다.
+  // 사본을 돌려주지 않는다 -- 완전히 불변이면 공유 참조로 충분하다.
   //
-  // **이 테스트를 지우지 말고 뒤집어라.** 깊은 freeze 나 사본 반환으로 결함을
-  // 고치면 아래 단정들이 깨진다. 그때 할 일은 테스트를 삭제하는 것이 아니라
-  // 방향을 뒤집는 것이다 — isFrozen 을 true 로, 공유 참조 단정을 "사본을
-  // 돌려준다"로, 변경 전파 단정을 "번지지 않는다"로. 지우면 같은 결함이
-  // 되돌아올 때 아무도 알지 못한다.
-  //
-  // 변조한 값은 아래 finally 에서 되돌린다. 같은 파일의 다른 테스트가 실행
-  // 순서에 영향받지 않는지는 바로 다음 테스트가 따로 확인한다. 파일 사이는
-  // node --test 가 파일마다 별도 프로세스를 쓰므로 영향이 없다.
+  // **이 테스트를 지우지 말고 뒤집어라.** 성능 때문에 freeze 를 빼고 싶어지면,
+  // 그 전에 호출자 전부가 읽기만 한다는 것을 증명해야 한다.
   const first = getRateLimitPolicy("unavailable");
-  assert.equal(Object.isFrozen(first), false, "반환 객체가 frozen 이 됐다 — 고쳐졌다면 이 테스트를 뒤집어라");
-  assert.equal(first, getRateLimitPolicy("unavailable"), "사본을 돌려주게 바뀌었다");
+  assert.equal(Object.isFrozen(first), true, "정책 객체가 freeze 되지 않았다");
+  assert.equal(Object.isFrozen(first.backoffSeconds), true, "backoffSeconds 배열이 freeze 되지 않았다");
+  assert.equal(first, getRateLimitPolicy("unavailable"), "불필요하게 사본을 만든다");
 
-  const original = first.minIntervalSeconds;
-  try {
-    first.minIntervalSeconds = 1;
-    assert.equal(
-      getRateLimitPolicy("unavailable").minIntervalSeconds,
-      1,
-      "변경이 번지지 않았다 — 방어가 추가됐다면 이 테스트를 뒤집어라",
-    );
-  } finally {
-    // 다른 테스트에 번지지 않게 되돌린다.
-    first.minIntervalSeconds = original;
+  // 변경 시도는 조용히 무시되거나 던진다. 어느 쪽이든 정책은 그대로여야 한다.
+  for (const mutate of [
+    () => { first.minIntervalSeconds = 1; },
+    () => { first.maxConsecutiveFailures = 999; },
+    () => { first.basis = "official_documented"; },
+    () => { first.backoffSeconds[0] = 1; },
+    () => { first.backoffSeconds.push(1); },
+    () => { delete first.minIntervalSeconds; },
+    () => { Object.assign(first, { minIntervalSeconds: 1 }); },
+  ]) {
+    try {
+      mutate();
+    } catch {
+      // strict mode 에서는 TypeError 가 난다. 그것도 통과다.
+    }
   }
-  assert.equal(getRateLimitPolicy("unavailable").minIntervalSeconds, 3600);
+
+  const after = getRateLimitPolicy("unavailable");
+  assert.equal(after.minIntervalSeconds, 3600, "최소 간격이 변조됐다 — 요청 폭주로 이어진다");
+  assert.equal(after.maxConsecutiveFailures, 1, "연속 실패 상한이 변조됐다");
+  assert.equal(after.basis, "conservative_default", "근거 표시가 변조됐다");
+  assert.deepEqual([...after.backoffSeconds], [3600], "backoffSeconds 가 변조됐다");
+});
+
+test("확인되지 않은 Provider 의 기본 정책도 불변이다", () => {
+  const fallback = getRateLimitPolicy("알 수 없는 provider");
+  assert.equal(Object.isFrozen(fallback), true, "FALLBACK 이 freeze 되지 않았다");
+  assert.equal(Object.isFrozen(fallback.backoffSeconds), true, "FALLBACK 배열이 freeze 되지 않았다");
+  try {
+    fallback.minIntervalSeconds = 1;
+  } catch {
+    /* 무시 */
+  }
+  assert.equal(getRateLimitPolicy("알 수 없는 provider").minIntervalSeconds, 300, "기본 정책이 변조됐다");
+});
+
+test("모든 정책이 빠짐없이 불변이다", () => {
+  for (const name of ["mock-server", "official-approved (stub)", "unavailable", "없는-이름"]) {
+    const policy = getRateLimitPolicy(name);
+    assert.equal(Object.isFrozen(policy), true, `${name}: 정책이 freeze 되지 않았다`);
+    assert.equal(Object.isFrozen(policy.backoffSeconds), true, `${name}: backoffSeconds 가 freeze 되지 않았다`);
+  }
 });
 
 test("앞 테스트가 정책을 오염시키지 않았다(실행 순서 독립성)", () => {
