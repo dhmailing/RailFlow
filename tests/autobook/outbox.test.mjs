@@ -109,7 +109,7 @@ test("보낼 알림이 없으면 아무 것도 세지 않는다", async () => {
   const store = createMemoryAutobookStore();
   const channel = createInMemoryChannel();
 
-  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 0 });
+  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 0, sentUnrecorded: 0 });
   assert.equal(channel.sent.length, 0);
 });
 
@@ -119,11 +119,11 @@ test("실패한 알림을 다음 차례에 다시 집어 보낸다", async () =>
   const store = await seed();
   const channel = flakyChannel(1); // 첫 번째만 실패
 
-  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 1 });
+  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 1, sentUnrecorded: 0 });
   assert.equal(channel.sent.length, 0, "실패했는데 보낸 것으로 기록됐다");
 
   // 두 번째 차례 — 같은 알림을 다시 집어야 한다.
-  assert.deepEqual(await flush(store, channel), { sent: 1, failed: 0 });
+  assert.deepEqual(await flush(store, channel), { sent: 1, failed: 0, sentUnrecorded: 0 });
   assert.equal(channel.attempts, 2, `재시도가 일어나지 않았다(시도 ${channel.attempts}회)`);
   assert.equal(channel.sent.length, 1);
 
@@ -139,7 +139,7 @@ test("연속 실패에서 failedAttempts 가 누적된다", async () => {
 
   for (const expected of [1, 2, 3]) {
     const result = await flush(store, channel);
-    assert.deepEqual(result, { sent: 0, failed: 1 });
+    assert.deepEqual(result, { sent: 0, failed: 1, sentUnrecorded: 0 });
     const [notification] = await store.listNotifications(JOB_ID);
     assert.equal(notification.failedAttempts, expected, `${expected}회차 누적이 틀렸다`);
     assert.equal(notification.claimedBy, null, "실패 후 claim 이 풀리지 않았다");
@@ -151,7 +151,7 @@ test("채널이 동기적으로 throw 해도 같게 처리된다", async () => {
   const store = await seed();
   const channel = failingChannel({ sync: true });
 
-  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 1 });
+  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 1, sentUnrecorded: 0 });
   const [notification] = await store.listNotifications(JOB_ID);
   assert.equal(notification.failedAttempts, 1);
   assert.equal(notification.sentAt, null);
@@ -163,9 +163,9 @@ test("이미 보낸 알림은 다시 집지 않는다", async () => {
   const store = await seed();
   const channel = createInMemoryChannel();
 
-  assert.deepEqual(await flush(store, channel), { sent: 1, failed: 0 });
+  assert.deepEqual(await flush(store, channel), { sent: 1, failed: 0, sentUnrecorded: 0 });
   // 두 번째 호출은 집을 것이 없어야 한다.
-  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 0 });
+  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 0, sentUnrecorded: 0 });
   assert.equal(channel.sent.length, 1, "같은 알림을 두 번 보냈다");
 });
 
@@ -176,7 +176,7 @@ test("보낸 알림은 claim 이 풀려도 다시 집히지 않는다", async ()
   const store = await seed();
   const channel = createInMemoryChannel();
 
-  assert.deepEqual(await flush(store, channel), { sent: 1, failed: 0 });
+  assert.deepEqual(await flush(store, channel), { sent: 1, failed: 0, sentUnrecorded: 0 });
   const [sentOne] = await store.listNotifications(JOB_ID);
   assert.ok(sentOne.sentAt);
 
@@ -194,7 +194,7 @@ test("보낸 알림은 claim 이 풀려도 다시 집히지 않는다", async ()
   assert.equal(afterRelease.claimedBy, null, "준비 단계에서 claim 이 풀리지 않았다");
   assert.ok(afterRelease.sentAt, "sentAt 이 사라졌다");
 
-  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 0 });
+  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 0, sentUnrecorded: 0 });
   assert.equal(channel.sent.length, 1, "claim 이 풀린 뒤 이미 보낸 알림을 또 보냈다");
 });
 
@@ -207,13 +207,13 @@ test("한 번 호출은 한 건만 처리한다", async () => {
     buildNotification({ job: makeJob({ status: "EXPIRED" }), kind: "EXPIRED", id: "n2" }),
   );
 
-  assert.deepEqual(await flush(store, channel), { sent: 1, failed: 0 });
+  assert.deepEqual(await flush(store, channel), { sent: 1, failed: 0, sentUnrecorded: 0 });
   assert.equal(channel.sent.length, 1, "한 번에 두 건을 보냈다");
 
-  assert.deepEqual(await flush(store, channel), { sent: 1, failed: 0 });
+  assert.deepEqual(await flush(store, channel), { sent: 1, failed: 0, sentUnrecorded: 0 });
   assert.equal(channel.sent.length, 2);
 
-  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 0 });
+  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 0, sentUnrecorded: 0 });
 });
 
 test("다른 Worker 가 집은 알림은 가져가지 않는다", async () => {
@@ -227,45 +227,98 @@ test("다른 Worker 가 집은 알림은 가져가지 않는다", async () => {
   });
   assert.ok(claimed, "준비 단계에서 집지 못했다");
 
-  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 0 });
+  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 0, sentUnrecorded: 0 });
   assert.equal(channel.sent.length, 0, "다른 Worker 의 알림을 보냈다");
 });
 
-// --- 보낸 뒤 기록이 실패하는 창 (동작 기록) -------------------------------
+// --- 보낸 뒤 기록이 실패하는 창 (T8 에서 닫았다) -------------------------
 
-test("보낸 뒤 sent 기록이 실패하면 실패로 남고 다음 차례에 다시 보낸다", async () => {
-  // flushOutboxOnce 의 try 가 channel.send 와 markNotificationSent 를 함께
-  // 감싼다. 그래서 전송은 성공했는데 상태 기록이 실패하면 알림이 미전송으로
-  // 남고, 다음 차례에 **같은 알림을 다시 보낸다**. 적어도 한 번 보내는 쪽을
-  // 택한 설계이며, 중복 전송 창이 존재한다는 사실을 여기 고정해 둔다.
-  const inner = await seed();
-  let failRecordOnce = true;
-  const store = new Proxy(inner, {
+/** markNotificationSent 를 n 번째 호출까지 실패시키는 store 래퍼. */
+function recordFailingStore(inner, failTimes) {
+  let calls = 0;
+  const proxy = new Proxy(inner, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
       if (prop !== "markNotificationSent" || typeof value !== "function") return value;
       return async (...args) => {
-        if (failRecordOnce) {
-          failRecordOnce = false;
-          throw new Error("상태 기록 실패(일시 오류)");
-        }
+        calls += 1;
+        if (calls <= failTimes) throw new Error("상태 기록 실패(일시 오류)");
         return value.apply(target, args);
       };
     },
   });
+  return { store: proxy, get calls() { return calls; } };
+}
+
+test("보낸 뒤 sent 기록이 끝까지 실패하면 다시 보내지 않고 sentUnrecorded 로 끝난다", async () => {
+  // T8 이전에는 channel.send 와 markNotificationSent 가 같은 try 안에 있어서,
+  // 전송은 성공했는데 기록이 실패하면 알림이 미전송으로 남고 다음 차례에
+  // **같은 알림을 다시 보냈다**(중복 전송 창). 지금은 둘을 분리하고, 기록
+  // 실패를 전송 실패로 세지 않으며, claim 을 놓지 않아 재전송을 막는다.
+  const inner = await seed();
+  const wrapped = recordFailingStore(inner, Number.POSITIVE_INFINITY);
   const channel = createInMemoryChannel();
 
-  // 1회차: 보냈지만 기록 실패 -> failed 로 집계된다.
-  assert.deepEqual(await flush(store, channel), { sent: 0, failed: 1 });
+  // 1회차: 보냈지만 기록은 끝까지 실패 -> failed 가 아니라 sentUnrecorded.
+  assert.deepEqual(await flush(wrapped.store, channel), { sent: 0, failed: 0, sentUnrecorded: 1 });
   assert.equal(channel.sent.length, 1, "실제로는 보냈어야 한다");
 
   const [afterFirst] = await inner.listNotifications(JOB_ID);
   assert.equal(afterFirst.sentAt, null, "기록이 실패했는데 sent 로 남았다");
-  assert.equal(afterFirst.failedAttempts, 1);
+  assert.equal(afterFirst.failedAttempts, 0, "기록 실패가 전송 실패로 집계됐다");
+  assert.equal(afterFirst.claimedBy, "w1", "claim 을 놓아서 다음 차례에 다시 집힌다");
 
-  // 2회차: 같은 알림을 다시 보낸다 -> 중복 전송.
-  assert.deepEqual(await flush(store, channel), { sent: 1, failed: 0 });
-  assert.equal(channel.sent.length, 2, "중복 전송 창이 없어졌다면 이 테스트를 고쳐야 한다");
-  const [afterSecond] = await inner.listNotifications(JOB_ID);
-  assert.ok(afterSecond.sentAt);
+  // 2회차: claim 이 남아 있으므로 집히지 않는다 -> 중복 전송이 없다.
+  assert.deepEqual(await flush(inner, channel), { sent: 0, failed: 0, sentUnrecorded: 0 });
+  assert.equal(channel.sent.length, 1, "같은 알림을 두 번 보냈다 — 중복 전송 창이 살아 있다");
+});
+
+test("기록 재시도는 유한하다", async () => {
+  // 무제한 재시도는 Worker 한 턴을 붙잡는다. 상한을 넘기면 포기한다.
+  const inner = await seed();
+  const wrapped = recordFailingStore(inner, Number.POSITIVE_INFINITY);
+
+  await flush(wrapped.store, createInMemoryChannel());
+  assert.ok(wrapped.calls >= 2, `재시도가 아예 없다(호출 ${wrapped.calls}회)`);
+  assert.ok(wrapped.calls <= 5, `기록 재시도가 ${wrapped.calls}회 — 상한이 없다`);
+});
+
+test("기록이 재시도에서 성공하면 정상 전송으로 끝난다", async () => {
+  const inner = await seed();
+  const wrapped = recordFailingStore(inner, 1);
+  const channel = createInMemoryChannel();
+
+  assert.deepEqual(await flush(wrapped.store, channel), { sent: 1, failed: 0, sentUnrecorded: 0 });
+  assert.equal(channel.sent.length, 1, "재시도 때문에 두 번 보냈다");
+  const [notification] = await inner.listNotifications(JOB_ID);
+  assert.ok(notification.sentAt, "기록이 성공했는데 sent 로 남지 않았다");
+});
+
+test("채널은 멱등키로 중복 전송을 억제한다", async () => {
+  // 기록 실패는 막을 수 있지만, 채널이 예외를 던졌는데 실제로는 전달된
+  // 경우는 Outbox 쪽에서 알 수 없다. 마지막 방어선은 채널의 멱등 처리다.
+  const channel = createInMemoryChannel();
+  const notification = buildNotification({ job: makeJob(), kind: "SEAT_HELD", id: "n1" });
+
+  await channel.send(notification, { idempotencyKey: notification.idempotencyKey });
+  await channel.send(notification, { idempotencyKey: notification.idempotencyKey });
+
+  assert.equal(channel.sent.length, 1, "채널이 같은 멱등키를 두 번 전달했다");
+  assert.equal(channel.suppressed.length, 1, "억제된 전송이 기록되지 않았다");
+});
+
+test("채널은 멱등키를 context 로도 받는다", async () => {
+  const seen = [];
+  const channel = {
+    name: "spy",
+    async send(notification, context) {
+      seen.push({ fromNotification: notification.idempotencyKey, fromContext: context?.idempotencyKey });
+    },
+  };
+  const store = await seed();
+
+  await flush(store, channel);
+  assert.equal(seen.length, 1);
+  assert.ok(seen[0].fromContext, "채널이 멱등키를 context 로 받지 못했다");
+  assert.equal(seen[0].fromContext, seen[0].fromNotification, "context 의 멱등키가 알림과 다르다");
 });

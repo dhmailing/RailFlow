@@ -161,7 +161,7 @@ test("Outbox 는 보낸 뒤에만 sent 로 표시한다", async () => {
   await store.enqueueNotification(buildNotification({ job: makeJob(), kind: "SEAT_HELD", id: "n1" }));
 
   const result = await flushOutboxOnce({ store, channel, workerId: "w1", fencingToken: 1 });
-  assert.deepEqual(result, { sent: 1, failed: 0 });
+  assert.deepEqual(result, { sent: 1, failed: 0, sentUnrecorded: 0 });
   assert.equal(channel.sent.length, 1);
   assert.ok((await store.listNotifications("job-n"))[0].sentAt);
 });
@@ -173,7 +173,7 @@ test("전송이 실패하면 다시 시도할 수 있게 남는다", async () =>
   await store.enqueueNotification(buildNotification({ job: makeJob(), kind: "SEAT_HELD", id: "n1" }));
 
   const result = await flushOutboxOnce({ store, channel: failing, workerId: "w1", fencingToken: 1 });
-  assert.deepEqual(result, { sent: 0, failed: 1 });
+  assert.deepEqual(result, { sent: 0, failed: 1, sentUnrecorded: 0 });
   const [notification] = await store.listNotifications("job-n");
   assert.equal(notification.sentAt, null);
   assert.equal(notification.failedAttempts, 1);
