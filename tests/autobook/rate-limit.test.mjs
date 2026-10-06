@@ -67,8 +67,17 @@ test("정책은 공유 참조이며 얕은 freeze 다(현재 동작 기록)", ()
   //
   // 지금 호출자는 둘 다 읽기만 한다(lib/autobook/worker.ts:63,
   // app/api/autobook/status/route.ts:47). 그래서 잠재 결함이다. 제품 코드를
-  // 고치지 않기로 했으므로 **사실을 고정**해 둔다. 깊은 freeze 나 사본 반환으로
-  // 바꾸면 이 테스트가 깨지고, 그때 위 단정들을 뒤집으면 된다.
+  // 고치지 않기로 했으므로 **사실을 고정**해 둔다.
+  //
+  // **이 테스트를 지우지 말고 뒤집어라.** 깊은 freeze 나 사본 반환으로 결함을
+  // 고치면 아래 단정들이 깨진다. 그때 할 일은 테스트를 삭제하는 것이 아니라
+  // 방향을 뒤집는 것이다 — isFrozen 을 true 로, 공유 참조 단정을 "사본을
+  // 돌려준다"로, 변경 전파 단정을 "번지지 않는다"로. 지우면 같은 결함이
+  // 되돌아올 때 아무도 알지 못한다.
+  //
+  // 변조한 값은 아래 finally 에서 되돌린다. 같은 파일의 다른 테스트가 실행
+  // 순서에 영향받지 않는지는 바로 다음 테스트가 따로 확인한다. 파일 사이는
+  // node --test 가 파일마다 별도 프로세스를 쓰므로 영향이 없다.
   const first = getRateLimitPolicy("unavailable");
   assert.equal(Object.isFrozen(first), false, "반환 객체가 frozen 이 됐다 — 고쳐졌다면 이 테스트를 뒤집어라");
   assert.equal(first, getRateLimitPolicy("unavailable"), "사본을 돌려주게 바뀌었다");
@@ -86,6 +95,19 @@ test("정책은 공유 참조이며 얕은 freeze 다(현재 동작 기록)", ()
     first.minIntervalSeconds = original;
   }
   assert.equal(getRateLimitPolicy("unavailable").minIntervalSeconds, 3600);
+});
+
+test("앞 테스트가 정책을 오염시키지 않았다(실행 순서 독립성)", () => {
+  // 위 테스트는 공유 정책 객체를 일부러 변조한다. finally 로 되돌리지만,
+  // 되돌리기가 빠지거나 try 블록이 중간에 터지면 이후 테스트가 조용히
+  // 오염된 값을 본다. 그 회귀를 여기서 잡는다.
+  const policy = getRateLimitPolicy("unavailable");
+  assert.equal(policy.minIntervalSeconds, 3600, "앞 테스트의 변조가 남아 있다");
+  assert.deepEqual(policy.backoffSeconds, [3600], "backoffSeconds 가 오염됐다");
+  assert.equal(policy.maxConsecutiveFailures, 1);
+  // 다른 정책도 함께 본다.
+  assert.equal(getRateLimitPolicy("mock-server").minIntervalSeconds, 1);
+  assert.equal(getRateLimitPolicy("official-approved (stub)").minIntervalSeconds, 60);
 });
 
 // --- nextCheckAt 경계값 ---------------------------------------------------
