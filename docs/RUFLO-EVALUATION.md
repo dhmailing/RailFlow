@@ -74,6 +74,75 @@
 
 ---
 
+## 새 환경에서 이어서 작업하는 절차
+
+컨테이너가 바뀌거나 다른 체크아웃에서 이어 받을 때. **설정은 이 브랜치에만
+커밋돼 있고, 작업 브랜치에는 미추적 복사본으로 꺼내 쓴다**(위 정정 참고).
+
+### 1. 의존성 복원
+
+`node_modules` 는 커밋하지 않는다. lockfile 로 재설치한다.
+
+```bash
+cd tools/ruflo-runtime
+npm ci            # package-lock.json 기준 정확한 재현 설치
+cd -
+node tools/ruflo-runtime/node_modules/ruflo/bin/ruflo.js --version   # ruflo v3.50.0
+```
+
+`npm install` 이 아니라 `npm ci` 를 쓴다 — lockfile 을 고치지 않고 그대로
+재현한다. 전역 `npx` 캐시는 쓰지 않는다. 그 캐시의 ruflo 설치가 깨져
+(`@claude-flow/cli-core` 가 빈 디렉터리, `@claude-flow/security` 누락)
+MCP 서버가 `ERR_MODULE_NOT_FOUND` 로 기동하지 못한 것이 로컬 설치로 옮긴
+이유다.
+
+### 2. 작업 브랜치에 설정 꺼내기
+
+작업 브랜치(예: `feature/autobook-team-dev`)에서:
+
+```bash
+git show chore/ruflo-evaluation:.mcp.json > .mcp.json
+mkdir -p .claude/skills
+git show chore/ruflo-evaluation:.claude/settings.json > .claude/settings.json
+for s in $(git ls-tree --name-only -r chore/ruflo-evaluation .claude/skills \
+            | sed 's|.claude/skills/||'); do
+  mkdir -p ".claude/skills/$(dirname "$s")"
+  git show "chore/ruflo-evaluation:.claude/skills/$s" > ".claude/skills/$s"
+done
+git show chore/ruflo-evaluation:tools/ruflo-runtime/package.json \
+  > tools/ruflo-runtime/package.json
+git show chore/ruflo-evaluation:tools/ruflo-runtime/package-lock.json \
+  > tools/ruflo-runtime/package-lock.json
+```
+
+꺼낸 파일은 **미추적 상태로 둔다. 작업 브랜치에 커밋하지 않는다.**
+작업 브랜치에는 런타임 상태 무시 규칙(`.gitignore` 의 `ruvector.db`,
+`.swarm/`, `.claude-flow/`, `tools/ruflo-runtime/node_modules/`)만 올린다.
+
+### 3. 확인
+
+```bash
+git show chore/ruflo-evaluation:.claude/settings.json | md5sum
+md5sum .claude/settings.json          # 두 값이 같아야 한다
+```
+
+MCP 서버가 뜨는지는 stdio 로 `initialize` 를 보내 확인한다. 이 세션이
+`.mcp.json` 을 집어 올리는 것은 **다음 턴 이후**다.
+
+### 4. 주의 — 이 브랜치로 돌아올 때
+
+작업 브랜치에 꺼내 둔 미추적 복사본은 이 브랜치에서 **추적 파일**이라서,
+복사본이 있는 상태로 `git checkout chore/ruflo-evaluation` 하면 git 이
+거부한다. 복사본을 다른 곳으로 옮긴 뒤 전환하고, 돌아와서 2번으로 다시
+꺼낸다.
+
+### 5. 커밋하지 않는 것
+
+`node_modules`, `.claude-flow/`, `.swarm/`, `ruvector.db`, 그리고 위에서 꺼낸
+설정 복사본.
+
+---
+
 ## 보류한 이유 — 권한 범위가 과하다
 
 `.claude/settings.json` 의 `permissions.allow` 에 다음이 있었다.
