@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  읽기 전용 설정이다.
+
+  android:isAccessibilityTool="false" 를 **명시**한다. 공식 문서(R.attr,
+  API 31)는 이 속성을 "접근성 서비스가 장애인 지원에 쓰이는지"로 정의하고
+  기본값이 false 라고 적는다. 이 앱은 장애인 지원 도구가 아니므로 false 가
+  정직한 선언이다. true 로 바꿔 지원 도구라고 주장하지 않는다. 문서는
+  이 값이 false 면 시스템이 일정 시간 후 사용자에게 개인정보 영향을
+  알리는 알림을 띄운다고 명시한다 — 그 고지를 받는 것이 맞다.
+
+  canPerformGestures, canRequestTouchExplorationMode, canRequestFilterKeyEvents 를
+  켜지 않는다. flagRequestFilterKeyEvents 도 없다. 즉 이 서비스는 입력을
+  가로채거나 화면을 조작할 수단을 갖지 않는다.
+
+  accessibilityFlags 를 비웠다. 전에는 flagReportViewIds 를 켜 두었지만
+  RailObserverService 는 뷰 ID 를 읽지 않는다(ObservedNode 에 그 자리가
+  없다). 쓰지 않는 정보를 요청하지 않는다.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/observer_service_description"
+    android:isAccessibilityTool="false"
+    android:notificationTimeout="300"
+    android:summary="@string/observer_service_summary" />
