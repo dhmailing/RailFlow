@@ -9,7 +9,8 @@
 
 | 항목 | 상태 |
 |---|---|
-| `android:isAccessibilityTool="false"` 명시 | 완료 |
+| `android:isAccessibilityTool="false"` 명시 | 완료 (실제 APK 에서 확인) |
+| 쓰지 않는 `flagReportViewIds` 요청 제거 | 완료 |
 | debuggable 이 아닌 release 빌드 타입 추가 | 완료 |
 | CI 가 release APK 를 빌드하고, Secret 이 있으면 서명 | 완료 |
 | 실제 APK 의 merged manifest·권한·서명·SDK 검사 | 완료 |

@@ -12,11 +12,14 @@
   canPerformGestures, canRequestTouchExplorationMode, canRequestFilterKeyEvents 를
   켜지 않는다. flagRequestFilterKeyEvents 도 없다. 즉 이 서비스는 입력을
   가로채거나 화면을 조작할 수단을 갖지 않는다.
+
+  accessibilityFlags 를 비웠다. 전에는 flagReportViewIds 를 켜 두었지만
+  RailObserverService 는 뷰 ID 를 읽지 않는다(ObservedNode 에 그 자리가
+  없다). 쓰지 않는 정보를 요청하지 않는다.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagReportViewIds"
     android:canRetrieveWindowContent="true"
     android:description="@string/observer_service_description"
     android:isAccessibilityTool="false"
