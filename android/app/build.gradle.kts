@@ -17,16 +17,48 @@ android {
         versionName = "0.1.0-readonly"
     }
 
+    // 배포용 서명. 키스토어는 저장소에 두지 않는다. CI 에서는 Secret 으로,
+    // 로컬에서는 환경변수로 넘긴다. 값이 없으면 서명 설정을 만들지 않고
+    // release 는 **서명되지 않은 APK** 로 나온다(설치 불가, 그대로 보고한다).
+    val keystoreBase64 = System.getenv("RAILFLOW_KEYSTORE_BASE64")
+    val keystorePassword = System.getenv("RAILFLOW_KEYSTORE_PASSWORD")
+    val keyAlias = System.getenv("RAILFLOW_KEY_ALIAS")
+    val keyPassword = System.getenv("RAILFLOW_KEY_PASSWORD")
+    val hasSigningMaterial = !keystoreBase64.isNullOrBlank() &&
+        !keystorePassword.isNullOrBlank() &&
+        !keyAlias.isNullOrBlank() &&
+        !keyPassword.isNullOrBlank()
+
+    if (hasSigningMaterial) {
+        signingConfigs {
+            create("upload") {
+                val decoded = layout.buildDirectory.file("upload-keystore.jks").get().asFile
+                decoded.parentFile.mkdirs()
+                decoded.writeBytes(java.util.Base64.getDecoder().decode(keystoreBase64))
+                storeFile = decoded
+                storePassword = keystorePassword
+                this.keyAlias = keyAlias
+                this.keyPassword = keyPassword
+            }
+        }
+    }
+
     buildTypes {
         debug {
-            // 설치용 디버그 빌드다. 난독화·축소를 쓰지 않는다.
+            // 개발용 디버그 빌드다. android:debuggable 이 true 로 들어간다.
+            // 공식 문서는 배포 시 false 로 둘 것을 요구한다
+            // (privacy-and-security/risks/android-debuggable).
             isMinifyEnabled = false
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
         }
         release {
-            // 이번 단계에서는 release 서명 설정을 두지 않는다.
+            // 설치·검토용 빌드. debuggable 이 false 다(기본값).
             isMinifyEnabled = false
+            isDebuggable = false
+            if (hasSigningMaterial) {
+                signingConfig = signingConfigs.getByName("upload")
+            }
         }
     }
 
