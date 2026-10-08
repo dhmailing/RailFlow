@@ -34,9 +34,34 @@ AGP·androidx 부재로는 Jetpack Compose 앱을 빌드할 수 없다.** 구형
 앱으로 바꾸는 것은 지시된 기술 구성(네이티브 Kotlin + Jetpack Compose)과
 다르므로 임의로 대체하지 않는다.
 
-## 해결 방법
+## 선택한 해결 방법 — GitHub Actions 빌드 (3안)
 
-### 1안 (권장) — 환경 네트워크 정책에 `dl.google.com` 허용
+사용자 결정에 따라 CI 에서 빌드한다.
+`.github/workflows/railflow-android.yml` 이 `android/**` 경로 변경과 수동
+실행에서만 돌고, 단위 테스트 → 린트 → 디버그 APK → SHA-256 을 artifact 로
+올린다. 서명 키·인증정보는 올리지 않는다. 이 환경의 네트워크 정책과 무관하게
+동작한다.
+
+**이 선택의 한계:** 개발 환경에서 컴파일·린트를 먼저 돌려볼 수 없으므로,
+CI 실패 로그를 읽고 고쳐 다시 돌리는 왕복이 생긴다.
+
+## 고정한 버전
+
+| 항목 | 버전 | 근거 |
+|---|---|---|
+| JDK | 17 (temurin) | AGP 8.7.x 가 요구하는 버전 |
+| Gradle | 8.11.1 (wrapper) | AGP 8.7.3 요구 최소 8.9 이상 |
+| AGP | 8.7.3 | compileSdk 35 지원 |
+| Kotlin | 2.0.21 | Compose 컴파일러 플러그인 같은 버전 |
+| Compose BOM | 2024.12.01 | Kotlin 2.0.21 과 함께 쓰이는 조합 |
+| compileSdk / targetSdk | 35 | |
+| minSdk | 26 | 적응형 아이콘과 알림 채널 기준 |
+
+`gradle/libs.versions.toml` 에 모두 고정했다. `latest`·`+`·범위를 쓰지 않는다.
+
+## 참고 — 다른 방법
+
+### 1안 — 환경 네트워크 정책에 `dl.google.com` 허용
 
 세션 제목줄의 cloud environment 메뉴 → Edit → Network access 에서
 `dl.google.com` 을 Allowed domains 에 추가한다(Allow package managers 는
@@ -54,14 +79,4 @@ SDK cmdline-tools 설치 → platform/build-tools 설치 → Gradle 빌드 →
 소스를 이 브랜치에서 받아 Android Studio 로 빌드한다. 다만 정과장님께
 Android Studio 설치를 요구하지 않는다는 조건이 있으므로 1안이 우선이다.
 
-### 3안 — GitHub Actions 로 빌드
-
-`ubuntu-latest` 러너에는 Android SDK 가 설치돼 있다. 워크플로를 추가하면
-CI 가 APK 를 artifact 로 만든다. 이 환경의 네트워크 정책과 무관하게
-동작한다. 다만 서명 키 관리와 artifact 다운로드 절차가 추가된다.
-
-## 버전 고정 방침
-
-동적 버전(`latest`, `+`, 범위)을 쓰지 않는다. 네트워크가 열린 뒤 실제로
-해석되는 조합을 확인하고 정확한 버전을 `gradle/libs.versions.toml` 에
-고정한다. 확인 전에 기억에 의존해 버전을 적어 두지 않는다.
+(3안을 채택했다. 위 "선택한 해결 방법" 참조.)

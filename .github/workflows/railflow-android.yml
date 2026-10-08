@@ -5,6 +5,9 @@
 #
 # 서명 키와 인증정보를 업로드하지 않는다. 디버그 APK 는 Android SDK 가
 # 자동 생성하는 debug 키로 서명되며, 그 키스토어는 artifact 에 넣지 않는다.
+#
+# 실패한 이유를 annotation 으로 남긴다. 그래야 로그 파일을 직접 열 수 없는
+# 환경에서도 무엇이 깨졌는지 알 수 있다.
 name: RailFlow Android
 
 on:
@@ -39,7 +42,6 @@ jobs:
       - name: Android SDK 구성요소 고정 설치
         run: |
           set -euo pipefail
-          echo "ANDROID_HOME=${ANDROID_HOME:-(unset)}"
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           test -x "$SDKMANAGER" || SDKMANAGER="$(command -v sdkmanager)"
           yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
@@ -47,12 +49,9 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "platform-tools"
-          "$SDKMANAGER" --list_installed || true
 
       - name: Gradle 준비 (캐시 포함)
         uses: gradle/actions/setup-gradle@v4
-        with:
-          build-root-directory: android
 
       - name: 버전 확인 기록
         working-directory: android
@@ -61,17 +60,39 @@ jobs:
           java -version
           ./gradlew --version
 
-      - name: 단위 테스트
+      # 테스트·린트·APK 를 한 단계에서 돌리고 출력을 파일로 남긴다.
+      # 뒤 단계가 그 파일에서 오류 줄만 뽑아 annotation 으로 올린다.
+      - name: 단위 테스트 · 린트 · 디버그 APK
+        id: gradle
         working-directory: android
-        run: ./gradlew --no-daemon :observer:testDebugUnitTest :app:testDebugUnitTest
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon --stacktrace \
+            :observer:testDebugUnitTest :app:testDebugUnitTest \
+            :observer:lintDebug :app:lintDebug \
+            :app:assembleDebug 2>&1 | tee "$RUNNER_TEMP/gradle-output.txt"
 
-      - name: 린트
-        working-directory: android
-        run: ./gradlew --no-daemon :observer:lintDebug :app:lintDebug
-
-      - name: 디버그 APK 빌드
-        working-directory: android
-        run: ./gradlew --no-daemon :app:assembleDebug
+      - name: 실패 원인을 annotation 으로 남기기
+        if: failure()
+        run: |
+          set +e
+          LOG="$RUNNER_TEMP/gradle-output.txt"
+          test -f "$LOG" || { echo "::error::Gradle 출력 파일이 없습니다. SDK·Gradle 준비 단계에서 실패했습니다."; exit 0; }
+          # Kotlin 컴파일 오류(e:), Gradle 실패 블록, 테스트 실패, 린트 오류를 뽑는다.
+          grep -nE "^e: |^w: .*\.kt|error:|^> |FAILURE: |Caused by: |Execution failed|\.kt:[0-9]+|Test.* FAILED|lint.*Error|^[0-9]+ errors?, " "$LOG" \
+            | head -40 \
+            | while IFS= read -r line; do
+                clean="$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g')"
+                echo "::error::${clean}"
+              done
+          {
+            echo "## 빌드 실패"
+            echo
+            echo '```'
+            tail -120 "$LOG"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
       - name: SHA-256 계산
         id: hash
@@ -98,6 +119,9 @@ jobs:
             echo "빌드 성공은 **실제 휴대폰·철도 앱 검증이 아닙니다.**"
             echo "공식 철도 앱 화면 읽기 검증은 NOT RUN 입니다."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: SHA-256 을 annotation 으로 남기기
+        run: echo "::notice::디버그 APK SHA-256 ${{ steps.hash.outputs.sha256 }}"
 
       - name: APK 와 SHA-256 업로드
         uses: actions/upload-artifact@v4

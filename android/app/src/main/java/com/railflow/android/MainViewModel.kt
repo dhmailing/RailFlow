@@ -133,7 +133,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopObservation() {
         ObserverSession.stop(StopReason.USER_STOPPED)
-        Notifications.observationStopped(getApplication(), "사용자가 관찰을 중단했습니다.")
+        Notifications.observationStopped(getApplication<Application>(), "사용자가 관찰을 중단했습니다.")
     }
 
     /**
@@ -157,7 +157,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         Notifications.observationRead(
-            getApplication(),
+            getApplication<Application>(),
             result.trains.joinToString("\n") { train ->
                 "${train.trainLabel} ${train.departAt ?: "시각 불명"} · 일반실 ${label(train.generalSeat)} · 특실 ${label(train.specialSeat)}"
             },
