@@ -1,3 +1,7 @@
+// build.gradle.kts 안에서 `java` 는 Gradle 의 java 확장으로 해석되어
+// java.util 패키지를 가린다. 그래서 최상단에서 import 한다.
+import java.util.Base64
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -34,7 +38,7 @@ android {
             create("upload") {
                 val decoded = layout.buildDirectory.file("upload-keystore.jks").get().asFile
                 decoded.parentFile.mkdirs()
-                decoded.writeBytes(java.util.Base64.getDecoder().decode(keystoreBase64))
+                decoded.writeBytes(Base64.getDecoder().decode(keystoreBase64))
                 storeFile = decoded
                 storePassword = keystorePassword
                 this.keyAlias = keyAlias
