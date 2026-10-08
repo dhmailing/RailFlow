@@ -43,8 +43,14 @@ object TrainRowParser {
         node.walk().flatMap { it.ownTexts().asSequence() }.filter { isTrainLabel(it) }.toList()
 
     /**
-     * 열차번호를 **정확히 하나** 포함하는 최소 하위 트리를 모은다.
-     * 행 경계를 트리 구조에서 가져오므로 순서 짝짓기가 필요 없다.
+     * 열차번호를 **정확히 하나** 포함하는 가장 큰 하위 트리를 모은다.
+     *
+     * 위에서 내려오면서 열차번호가 둘 이상이면 자식으로 더 내려가고, 하나가
+     * 되는 지점에서 멈춘다. 그 지점이 행이다 -- 부모에는 다른 열차가 섞여
+     * 있었고, 이 노드 안에는 이 열차의 시각·좌석 문구가 함께 들어 있다.
+     *
+     * 더 내려가면 안 된다. 열차번호 TextView 하나만 남아 시각과 좌석 문구를
+     * 잃는다. 반대로 더 올라가면 다른 열차의 문구가 섞인다.
      */
     fun findRows(root: ObservedNode): List<ObservedNode> {
         val rows = mutableListOf<ObservedNode>()
@@ -53,11 +59,7 @@ object TrainRowParser {
             val labels = trainLabelsIn(node)
             when {
                 labels.isEmpty() -> return
-                labels.size == 1 -> {
-                    // 자식 중에 같은 열차번호를 품은 더 작은 트리가 있으면 그쪽이 행이다.
-                    val smaller = node.children.firstOrNull { trainLabelsIn(it).size == 1 }
-                    if (smaller != null) visit(smaller) else rows.add(node)
-                }
+                labels.size == 1 -> rows.add(node)
                 else -> node.children.forEach { visit(it) }
             }
         }

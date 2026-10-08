@@ -78,13 +78,31 @@ jobs:
           set +e
           LOG="$RUNNER_TEMP/gradle-output.txt"
           test -f "$LOG" || { echo "::error::Gradle 출력 파일이 없습니다. SDK·Gradle 준비 단계에서 실패했습니다."; exit 0; }
-          # Kotlin 컴파일 오류(e:), Gradle 실패 블록, 테스트 실패, 린트 오류를 뽑는다.
-          grep -nE "^e: |^w: .*\.kt|error:|^> |FAILURE: |Caused by: |Execution failed|\.kt:[0-9]+|Test.* FAILED|lint.*Error|^[0-9]+ errors?, " "$LOG" \
-            | head -40 \
-            | while IFS= read -r line; do
-                clean="$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g')"
-                echo "::error::${clean}"
-              done
+          emit() {
+            # annotation 한 줄에 개행을 넣을 수 없으므로 줄마다 하나씩 올린다.
+            while IFS= read -r line; do
+              [ -n "$line" ] || continue
+              clean="$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g')"
+              echo "::error::${clean}"
+            done
+          }
+
+          # "> Task :..." 진행 로그는 버린다. 지난번에 이 줄들이 한도를 채워
+          # 실제 오류를 밀어냈다.
+          NOISE='^> Task |^> Configure |^Download |^Starting a Gradle Daemon|^Calculating task graph|^Welcome to Gradle'
+          FILTERED="$RUNNER_TEMP/filtered.txt"
+          grep -vE "$NOISE" "$LOG" > "$FILTERED" || true
+
+          SIGNAL="$RUNNER_TEMP/signal.txt"
+          grep -nE "^e: |^error: | error: |\.kt:[0-9]+:[0-9]+|FAILURE: Build|^\* What went wrong|^\* Where|Caused by: |Execution failed for task|Compilation error|tests? completed.*failed|FAILED$|Lint found [0-9]+ error|^[0-9]+ errors?," "$FILTERED" > "$SIGNAL" || true
+
+          if [ -s "$SIGNAL" ]; then
+            head -30 "$SIGNAL" | emit
+          else
+            # 패턴에 안 걸렸다. 꼬리를 그대로 올려 다음 판단 근거로 남긴다.
+            echo "::error::알려진 오류 패턴에 걸리지 않았습니다. 로그 꼬리를 올립니다."
+            tail -25 "$FILTERED" | emit
+          fi
           {
             echo "## 빌드 실패"
             echo

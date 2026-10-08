@@ -1,11 +1,14 @@
 package com.railflow.android
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 
 /**
  * 결과·오류·중단 안내용 알림.
@@ -33,8 +36,22 @@ object Notifications {
         manager?.createNotificationChannel(channel)
     }
 
-    fun hasPermission(context: Context): Boolean =
-        NotificationManagerCompat.from(context).areNotificationsEnabled()
+    /**
+     * 알림을 보낼 수 있는가.
+     *
+     * API 33 이상에서는 런타임 권한을 직접 확인한다. areNotificationsEnabled()
+     * 만으로는 lint 가 권한 검사로 알아보지 못하고, 사용자가 채널을 끈 경우도
+     * 함께 걸러야 한다.
+     */
+    fun hasPermission(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return false
+        }
+        return NotificationManagerCompat.from(context).areNotificationsEnabled()
+    }
 
     private fun notify(context: Context, id: Int, title: String, body: String) {
         if (!hasPermission(context)) return

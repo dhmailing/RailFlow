@@ -27,6 +27,7 @@ android {
 }
 
 dependencies {
-    implementation(libs.kotlinx.coroutines.core)
+    // :app 이 ObserverSession.state(StateFlow) 를 타입으로 쓰므로 api 로 노출한다.
+    api(libs.kotlinx.coroutines.core)
     testImplementation(libs.junit)
 }
