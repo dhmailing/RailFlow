@@ -62,6 +62,34 @@ jobs:
 
       # 테스트·린트·APK 를 한 단계에서 돌리고 출력을 파일로 남긴다.
       # 뒤 단계가 그 파일에서 오류 줄만 뽑아 annotation 으로 올린다.
+      # 로컬에서 빌드할 수 없는 환경이라 사소한 리소스 오류가 CI 왕복을
+      # 만든다. 빌드 전에 XML 을 엄격히 검사해 한 번에 걸러낸다.
+      # (python minidom 은 주석 안의 "--" 를 통과시키지만 AGP 의 파서는
+      # 거부한다. 실제로 그 차이로 한 번 실패했다.)
+      - name: 리소스 XML 엄격 검사
+        working-directory: android
+        run: |
+          python3 - <<'PYEOF'
+          import glob, io, re, sys
+          import xml.etree.ElementTree as ET
+          problems = []
+          targets = glob.glob("*/src/main/res/**/*.xml", recursive=True)
+          targets += glob.glob("*/src/main/AndroidManifest.xml")
+          for path in sorted(targets):
+              text = io.open(path, encoding="utf-8").read()
+              for match in re.finditer(r"<!--(.*?)-->", text, re.S):
+                  if "--" in match.group(1):
+                      problems.append(f"{path}: 주석 안에 '--' 가 있습니다(XML 규칙 위반)")
+              try:
+                  ET.fromstring(text)
+              except ET.ParseError as error:
+                  problems.append(f"{path}: {error}")
+          for p in problems:
+              print(f"::error::[res-xml] {p}")
+          print(f"검사한 XML {len(targets)}개, 문제 {len(problems)}개")
+          sys.exit(1 if problems else 0)
+          PYEOF
+
       - name: 단위 테스트 · 린트 · 디버그/릴리스 APK
         id: gradle
         working-directory: android

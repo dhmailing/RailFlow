@@ -7,7 +7,7 @@
   기본값이 false 라고 적는다. 이 앱은 장애인 지원 도구가 아니므로 false 가
   정직한 선언이다. true 로 바꿔 지원 도구라고 주장하지 않는다. 문서는
   이 값이 false 면 시스템이 일정 시간 후 사용자에게 개인정보 영향을
-  알리는 알림을 띄운다고 명시한다 -- 그 고지를 받는 것이 맞다.
+  알리는 알림을 띄운다고 명시한다 — 그 고지를 받는 것이 맞다.
 
   canPerformGestures, canRequestTouchExplorationMode, canRequestFilterKeyEvents 를
   켜지 않는다. flagRequestFilterKeyEvents 도 없다. 즉 이 서비스는 입력을
