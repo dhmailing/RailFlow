@@ -125,6 +125,73 @@ jobs:
           sha256sum railflow-readonly-debug.apk | tee railflow-readonly-debug.apk.sha256
           echo "sha256=$(cut -d' ' -f1 railflow-readonly-debug.apk.sha256)" >> "$GITHUB_OUTPUT"
 
+      # --- 차단 원인 조사용 APK 검사 -------------------------------------
+      # 소스 manifest 가 아니라 **실제로 만들어진 APK** 를 본다. 결과를
+      # annotation 으로 올린다(이 저장소를 보는 환경에서 로그 파일을 열 수
+      # 없다). 전체 출력은 artifact 로도 올린다.
+      - name: APK 검사 - 환경 준비
+        id: tools
+        working-directory: android
+        run: |
+          set -euo pipefail
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          APKAN="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          APK="$(find app/build/outputs/apk/debug -name '*.apk' -print -quit)"
+          mkdir -p ../inspect
+          echo "bt=$BT"       >> "$GITHUB_OUTPUT"
+          echo "apkan=$APKAN" >> "$GITHUB_OUTPUT"
+          echo "apk=$APK"     >> "$GITHUB_OUTPUT"
+          "$APKAN" manifest print "$APK" > ../inspect/merged-manifest.xml
+          "$APKAN" manifest permissions "$APK" > ../inspect/permissions.txt
+          "$APKAN" apk summary "$APK" > ../inspect/apk-summary.txt 2>&1 || true
+          "$BT/aapt2" dump badging "$APK" > ../inspect/badging.txt
+          "$BT/apksigner" verify -v --print-certs "$APK" > ../inspect/signer.txt 2>&1 || true
+          "$BT/aapt2" dump xmltree --file res/xml/rail_observer_config.xml "$APK" > ../inspect/accessibility-config.txt 2>&1 || true
+          ./gradlew --no-daemon -q :app:dependencies --configuration debugRuntimeClasspath > ../inspect/dependencies.txt 2>&1 || true
+          wc -l ../inspect/*.txt ../inspect/*.xml
+
+      - name: APK 검사 - 권한과 SDK
+        working-directory: android
+        run: |
+          {
+            echo "APK=$(basename '${{ steps.tools.outputs.apk }}')"
+            grep -E "^(package|sdkVersion|targetSdkVersion|uses-permission|uses-feature|application-label:|application-debuggable)" ../inspect/badging.txt || true
+            echo "선언된 권한 총 $(wc -l < ../inspect/permissions.txt)개"
+            cat ../inspect/permissions.txt
+          } | head -24 | while IFS= read -r l; do echo "::notice::[권한/SDK] ${l//%/%25}"; done
+
+      - name: APK 검사 - merged manifest 요약
+        working-directory: android
+        run: |
+          grep -nE "<(uses-permission|uses-sdk|uses-feature|service|activity|application|meta-data)" ../inspect/merged-manifest.xml \
+            | sed 's/^[[:space:]]*//' | head -24 \
+            | while IFS= read -r l; do echo "::notice::[manifest] ${l//%/%25}"; done
+          grep -nE "android:(exported|permission|isAccessibilityTool|allowBackup|name)=" ../inspect/merged-manifest.xml \
+            | sed 's/^[[:space:]]*//' | head -24 \
+            | while IFS= read -r l; do echo "::notice::[manifest-attr] ${l//%/%25}"; done
+
+      - name: APK 검사 - 접근성 설정과 서명
+        working-directory: android
+        run: |
+          grep -E "A: |E: " ../inspect/accessibility-config.txt | sed 's/^[[:space:]]*//' | head -20 \
+            | while IFS= read -r l; do echo "::notice::[a11y] ${l//%/%25}"; done
+          grep -E "^(Verified using|Signer #1 certificate (DN|SHA-256)|Number of signers|DOES|WARNING)" ../inspect/signer.txt | head -12 \
+            | while IFS= read -r l; do echo "::notice::[signer] ${l//%/%25}"; done
+
+      - name: APK 검사 - 포함된 SDK
+        working-directory: android
+        run: |
+          grep -E "^(\+---|\\---)" ../inspect/dependencies.txt | sed 's/[+\\|-]//g; s/^ *//' | sort -u | head -24 \
+            | while IFS= read -r l; do echo "::notice::[sdk] ${l//%/%25}"; done
+
+      - name: APK 검사 결과 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: railflow-apk-inspection
+          path: inspect/
+          if-no-files-found: error
+          retention-days: 30
+
       - name: 결과 요약
         run: |
           {
