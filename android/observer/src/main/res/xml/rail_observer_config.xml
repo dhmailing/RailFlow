@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  읽기 전용 설정이다.
+
+  canPerformGestures, canRequestTouchExplorationMode, canRequestFilterKeyEvents 를
+  켜지 않는다. flagRequestFilterKeyEvents 도 없다. 즉 이 서비스는 입력을
+  가로채거나 화면을 조작할 수단을 갖지 않는다.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/observer_service_description"
+    android:notificationTimeout="300"
+    android:summary="@string/observer_service_summary" />

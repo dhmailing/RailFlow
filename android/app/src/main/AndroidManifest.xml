@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      요청하는 권한은 알림 하나다. 접근성 서비스는 권한 선언이 아니라
+      사용자가 설정에서 직접 켜는 방식이며 observer 모듈이 선언한다.
+
+      요청하지 않는 것: 화면 캡처(FOREGROUND_SERVICE_MEDIA_PROJECTION),
+      다른 앱 위에 표시(SYSTEM_ALERT_WINDOW), 알림 읽기(BIND_NOTIFICATION_
+      LISTENER_SERVICE), 전체 파일 접근(MANAGE_EXTERNAL_STORAGE), 연락처,
+      SMS, 위치, 카메라, 마이크, 배터리 최적화 예외(REQUEST_IGNORE_
+      BATTERY_OPTIMIZATIONS), 인터넷(INTERNET).
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:name=".RailFlowApplication"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.RailFlow">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.RailFlow"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+</manifest>

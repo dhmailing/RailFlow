@@ -1,0 +1,123 @@
+# RailFlow Android 읽기 전용 MVP — 테스트·린트·디버그 APK 빌드.
+#
+# 이 워크플로는 **Android 경로가 바뀔 때와 수동 실행에서만** 돈다.
+# 웹 워크플로·배포 설정은 건드리지 않는다.
+#
+# 서명 키와 인증정보를 업로드하지 않는다. 디버그 APK 는 Android SDK 가
+# 자동 생성하는 debug 키로 서명되며, 그 키스토어는 artifact 에 넣지 않는다.
+name: RailFlow Android
+
+on:
+  push:
+    paths:
+      - 'android/**'
+      - '.github/workflows/railflow-android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railflow-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 테스트·린트·디버그 APK
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: 소스 가져오기
+        uses: actions/checkout@v4
+
+      - name: JDK 17 고정
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK 구성요소 고정 설치
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_HOME:-(unset)}"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER" || SDKMANAGER="$(command -v sdkmanager)"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --install \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "platform-tools"
+          "$SDKMANAGER" --list_installed || true
+
+      - name: Gradle 준비 (캐시 포함)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: android
+
+      - name: 버전 확인 기록
+        working-directory: android
+        run: |
+          set -euo pipefail
+          java -version
+          ./gradlew --version
+
+      - name: 단위 테스트
+        working-directory: android
+        run: ./gradlew --no-daemon :observer:testDebugUnitTest :app:testDebugUnitTest
+
+      - name: 린트
+        working-directory: android
+        run: ./gradlew --no-daemon :observer:lintDebug :app:lintDebug
+
+      - name: 디버그 APK 빌드
+        working-directory: android
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: SHA-256 계산
+        id: hash
+        working-directory: android
+        run: |
+          set -euo pipefail
+          APK="$(find app/build/outputs/apk/debug -name '*.apk' -print -quit)"
+          test -n "$APK"
+          mkdir -p ../artifact
+          cp "$APK" "../artifact/railflow-readonly-debug.apk"
+          cd ../artifact
+          sha256sum railflow-readonly-debug.apk | tee railflow-readonly-debug.apk.sha256
+          echo "sha256=$(cut -d' ' -f1 railflow-readonly-debug.apk.sha256)" >> "$GITHUB_OUTPUT"
+
+      - name: 결과 요약
+        run: |
+          {
+            echo "## RailFlow Android 디버그 APK"
+            echo
+            echo "- 설치용 **디버그** 빌드입니다. 배포 서명이 아닙니다."
+            echo "- SHA-256: \`${{ steps.hash.outputs.sha256 }}\`"
+            echo "- 커밋: \`${{ github.sha }}\`"
+            echo
+            echo "빌드 성공은 **실제 휴대폰·철도 앱 검증이 아닙니다.**"
+            echo "공식 철도 앱 화면 읽기 검증은 NOT RUN 입니다."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: APK 와 SHA-256 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: railflow-readonly-debug-apk
+          path: |
+            artifact/railflow-readonly-debug.apk
+            artifact/railflow-readonly-debug.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 실패 시 리포트 업로드
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: railflow-android-reports
+          path: |
+            android/app/build/reports/
+            android/observer/build/reports/
+            android/app/build/outputs/lint-results-debug.xml
+            android/observer/build/outputs/lint-results-debug.xml
+          if-no-files-found: ignore
+          retention-days: 7
