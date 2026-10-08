@@ -9,6 +9,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -123,8 +124,14 @@ fun RailFlowApp(onRequestNotificationPermission: () -> Unit) {
     }
 }
 
+/**
+ * 하단 탐색 항목 하나.
+ *
+ * `NavigationBarItem` 은 Material3 에서 `RowScope` 확장이므로, 이 함수도
+ * 같은 수신자를 받아야 `NavigationBar { }` 안에서 쓸 수 있다.
+ */
 @Composable
-private fun BottomTab(
+private fun RowScope.BottomTab(
     target: Tab,
     current: Tab,
     iconRes: Int,
