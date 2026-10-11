@@ -152,6 +152,19 @@ https://github.com/dhmailing/RailFlow/settings/secrets/actions
 등록 후 목록에 이름 4개가 보이면 됩니다. GitHub 은 값을 다시 보여주지
 않습니다(정상입니다).
 
+### 현재 상태 (2026-10-11 CI 확인)
+
+| Secret | 등록 여부 |
+|---|---|
+| `RAILFLOW_KEYSTORE_BASE64` | **미등록** |
+| `RAILFLOW_KEYSTORE_PASSWORD` | **미등록** |
+| `RAILFLOW_KEY_ALIAS` | **미등록** |
+| `RAILFLOW_KEY_PASSWORD` | **미등록** |
+
+그래서 release APK 는 서명되지 않았고 **설치할 수 없다.** CI 가 파일명에
+`-UNSIGNED-DO-NOT-INSTALL` 을 붙여 올린다. 서명 경로는 Secret 하나만
+기다리는 상태로 끝까지 준비돼 있다.
+
 ### 2-6단계. 알려주시면 제가 할 일
 
 "Secret 4개 등록했다"고만 알려 주십시오. **값은 보내지 마십시오.** 제가

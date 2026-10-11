@@ -194,6 +194,33 @@ isPassword, isEditable, recycle()
 API 나 네트워크 API 가 들어오면 빌드가 실패한다. 문서의 약속이 아니라
 빌드 게이트다.
 
+### 3-8. 설치 비교 시 함께 달라지는 변수
+
+차단된 APK 와 앞으로 시험할 서명된 release APK 를 비교할 때, **변수가
+하나가 아니다.** 셋이 동시에 달라진다. 결과를 한 가지 원인으로 돌리지
+않도록 기록해 둔다.
+
+| 변수 | 차단된 debug APK | 서명될 release APK |
+|---|---|---|
+| 패키지명 | `com.railflow.android.debug` | `com.railflow.android` |
+| `application-debuggable` | 있음 (true) | 없음 (false) |
+| 서명 | Android 디버그 키 | 사용자 업로드 키 |
+| `isAccessibilityTool` | 속성 없음(기본 false) | `false` 명시 |
+| `flagReportViewIds` | 있음 | 제거됨 |
+
+**패키지명 차이는 차단 회피를 위해 바꾼 것이 아니다.** debug 빌드 타입의
+`applicationIdSuffix = ".debug"` 때문이며, 이 설정은 Android 앱에서 debug
+와 release 를 같은 기기에 함께 설치할 수 있게 하는 표준 관행이고 첫
+커밋부터 그렇게 있었다. 차단을 피하려고 이름을 바꾸는 일은 하지 않는다.
+
+따라서 release APK 설치 결과를 해석할 때 이렇게 구분한다.
+
+- **설치가 되면**: 어느 변수가 결정적이었는지 이 시험 하나로는 알 수
+  없다. 서명·debuggable·패키지명 중 무엇인지 가리려면 변수를 하나씩
+  바꿔 추가 시험이 필요하다.
+- **여전히 차단되면**: 서명과 debuggable 은 요인이 아니라는 뜻이 되고,
+  추정 1(접근성 서비스 선언 자체가 트리거)이 강해진다.
+
 ## 4. 공식 문서와의 대조 — 사실 / 해석 / 추정
 
 ### 4-1. 확인된 사실 (이번에 원문을 직접 읽음)
