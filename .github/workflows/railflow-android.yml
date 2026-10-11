@@ -90,9 +90,52 @@ jobs:
           sys.exit(1 if problems else 0)
           PYEOF
 
+      # 접근성 서비스가 화면을 조작하지 않는다는 것을 주석이 아니라
+      # 코드로 확인한다. 주석·문자열을 지운 뒤 조작 API 를 찾는다.
+      - name: 읽기 전용 강제 검사
+        working-directory: android
+        run: |
+          python3 - <<'PYEOF'
+          import glob, io, re, sys
+          BANNED = [
+              "performAction", "performGlobalAction", "dispatchGesture",
+              "takeScreenshot", "GLOBAL_ACTION_", "ACTION_CLICK",
+              "ACTION_SET_TEXT", "ACTION_SCROLL_FORWARD", "ACTION_SCROLL_BACKWARD",
+              "setServiceInfo",
+          ]
+          NET = ["HttpURLConnection", "openConnection", "OkHttpClient", "Retrofit",
+                 "java.net.Socket", "WebView"]
+          problems = []
+          files = glob.glob("*/src/main/java/**/*.kt", recursive=True)
+          for path in sorted(files):
+              src = io.open(path, encoding="utf-8").read()
+              # 주석과 문자열 리터럴을 지운다.
+              stripped = re.sub(r"/\*.*?\*/", " ", src, flags=re.S)
+              stripped = re.sub(r"//[^\n]*", " ", stripped)
+              stripped = re.sub(r'"""(?:.|\n)*?"""', '""', stripped)
+              stripped = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', stripped)
+              for token in BANNED:
+                  if token in stripped:
+                      problems.append(f"{path}: 조작 API '{token}' 호출이 있습니다")
+              for token in NET:
+                  if token in stripped:
+                      problems.append(f"{path}: 네트워크 API '{token}' 사용이 있습니다")
+          for p in problems:
+              print(f"::error::[읽기전용] {p}")
+          print(f"검사한 Kotlin 파일 {len(files)}개, 위반 {len(problems)}개")
+          sys.exit(1 if problems else 0)
+          PYEOF
+
       - name: 단위 테스트 · 린트 · 디버그/릴리스 APK
         id: gradle
         working-directory: android
+        env:
+          # Secret 이 없으면 빈 문자열이 들어가고 release 는 서명되지 않는다.
+          # 값을 echo 하지 않는다. 존재 여부만 뒤 단계에서 보고한다.
+          RAILFLOW_KEYSTORE_BASE64: ${{ secrets.RAILFLOW_KEYSTORE_BASE64 }}
+          RAILFLOW_KEYSTORE_PASSWORD: ${{ secrets.RAILFLOW_KEYSTORE_PASSWORD }}
+          RAILFLOW_KEY_ALIAS: ${{ secrets.RAILFLOW_KEY_ALIAS }}
+          RAILFLOW_KEY_PASSWORD: ${{ secrets.RAILFLOW_KEY_PASSWORD }}
         run: |
           set -o pipefail
           ./gradlew --no-daemon --stacktrace \
@@ -150,7 +193,16 @@ jobs:
           mkdir -p ../artifact
           cp "$APK" "../artifact/railflow-readonly-debug.apk"
           REL="$(find app/build/outputs/apk/release -name '*.apk' -print -quit || true)"
-          if [ -n "$REL" ]; then cp "$REL" "../artifact/railflow-readonly-release.apk"; fi
+          # 서명되지 않은 APK 는 설치할 수 없다. 설치용 이름으로 올리지 않고
+          # -UNSIGNED-DO-NOT-INSTALL 을 붙여 혼동을 막는다.
+          if [ -n "$REL" ]; then
+            BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+            if "$BT/apksigner" verify "$REL" >/dev/null 2>&1; then
+              cp "$REL" "../artifact/railflow-readonly-release.apk"
+            else
+              cp "$REL" "../artifact/railflow-readonly-release-UNSIGNED-DO-NOT-INSTALL.apk"
+            fi
+          fi
           cd ../artifact
           sha256sum *.apk | tee checksums.txt
           sha256sum railflow-readonly-debug.apk > railflow-readonly-debug.apk.sha256
@@ -244,6 +296,40 @@ jobs:
             done
           } | head -8 | while IFS= read -r l; do echo "::notice::[권한부재] ${l//%/%25}"; done
 
+      - name: 검사 7 - release 서명 상태
+        working-directory: android
+        env:
+          HAS_KEYSTORE: ${{ secrets.RAILFLOW_KEYSTORE_BASE64 != '' }}
+          HAS_STOREPW: ${{ secrets.RAILFLOW_KEYSTORE_PASSWORD != '' }}
+          HAS_ALIAS: ${{ secrets.RAILFLOW_KEY_ALIAS != '' }}
+          HAS_KEYPW: ${{ secrets.RAILFLOW_KEY_PASSWORD != '' }}
+        run: |
+          # Secret 의 **존재 여부만** 보고한다. 값을 출력하지 않는다.
+          {
+            echo "RAILFLOW_KEYSTORE_BASE64 등록=$HAS_KEYSTORE"
+            echo "RAILFLOW_KEYSTORE_PASSWORD 등록=$HAS_STOREPW"
+            echo "RAILFLOW_KEY_ALIAS 등록=$HAS_ALIAS"
+            echo "RAILFLOW_KEY_PASSWORD 등록=$HAS_KEYPW"
+            if [ -f ../inspect/release-signer.txt ] && grep -q "^Verified$" ../inspect/release-signer.txt; then
+              echo "release APK 서명 검증: 통과 (설치 가능)"
+            else
+              echo "release APK 서명 검증: 실패 또는 미서명 (설치 불가)"
+            fi
+          } | head -8 | while IFS= read -r l; do echo "::notice::[서명상태] ${l//%/%25}"; done
+
+      - name: 검사 8 - 서명된 release APK 상세
+        working-directory: android
+        run: |
+          if ! grep -q "^Verified$" ../inspect/release-signer.txt 2>/dev/null; then
+            echo "::notice::[release-상세] 서명되지 않아 생략합니다. 설치용으로 안내하지 않습니다."
+            exit 0
+          fi
+          {
+            grep -E "^(Signer #1 certificate (DN|SHA-256 digest)|Number of signers|Verified using v[23] )" ../inspect/release-signer.txt
+            grep -o 'isAccessibilityTool[^ ]*' ../inspect/release-a11y.txt | head -1
+            grep -E "^application-debuggable" ../inspect/release-badging.txt || echo "application-debuggable 없음 (= false)"
+          } | head -8 | while IFS= read -r l; do echo "::notice::[release-상세] ${l//%/%25}"; done
+
       - name: APK 검사 결과 업로드
         uses: actions/upload-artifact@v4
         with:
@@ -277,6 +363,8 @@ jobs:
             artifact/railflow-readonly-debug.apk.sha256
             artifact/railflow-readonly-release.apk
             artifact/railflow-readonly-release.apk.sha256
+            artifact/railflow-readonly-release-UNSIGNED-DO-NOT-INSTALL.apk
+            artifact/checksums.txt
           if-no-files-found: error
           retention-days: 30
 

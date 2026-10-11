@@ -10,10 +10,22 @@
 | 결과 | **설치 차단 (BLOCKED)** |
 | 차단 주체 | Google Play 프로텍트 |
 | 표시 문구 | "기기 보호를 위해 앱 차단됨" / "이 앱에서 민감한 정보에 대한 액세스 권한을 요청할 수 있습니다. 이로 인해 신원 도용이나 금융 사기 위험이 높아질 수 있습니다." |
+| 차단 화면 버튼 | **`확인` 하나뿐** (사용자 캡처로 확인) → **하드 차단**. "무시하고 설치" 선택지가 없었다 |
 | 보고자 | 사용자 실기기 관찰 |
 
 **이전 보고 정정:** CI 빌드 성공을 설치 가능으로 읽지 않았고 실기기 검증은
 NOT RUN 으로 적어 두었다. 이제 그 항목은 NOT RUN 이 아니라 **BLOCKED** 다.
+
+## 1-2. 이전 보고에서 정정하는 단정
+
+이 문서와 이전 대화에서 제가 과하게 단정한 부분이다. 정정 내용을 먼저 적는다.
+
+| 이전 표현 | 정정 |
+|---|---|
+| "`isAccessibilityTool="false"` 명시의 **부작용**으로 `accessibilityDataSensitive="yes"` 뷰를 읽을 수 없게 된다" | **틀렸다.** 이 속성의 기본값이 이미 false 였으므로(R.attr, API 31), 명시는 **런타임 동작을 바꾸지 않는다.** 그 읽기 제한은 차단된 `f19f554` 에도 똑같이 적용되고 있었다. 명시의 효과는 선언을 manifest 에 드러내는 것뿐이다 |
+| "하드 차단이라 **Play 배포가 사실상 유일한 경로**다" | **철회한다.** 차단 화면에 `확인` 만 있었던 것은 사실이지만, 그로부터 Play 배포가 유일한 경로라는 결론은 나오지 않는다. 이의신청 경로가 있고(§4-2 의 공식 주소), 개발자 검증의 제한 배포 계정 같은 다른 경로도 있다. 어느 경로가 통할지는 확인하지 못했다 |
+| "`INTERNET` 권한이 없으므로 **모든 외부 전달이 불가능하다**" | **과했다.** 정확히는 **앱이 직접 네트워크 통신을 할 수 없다**는 것이다. 간접 경로는 코드 검토로 따로 확인했다(§3-6). 실제로 **알림을 통한 노출 경로가 하나 있다** |
+| 읽기 전용 근거를 "`canPerformGestures` 등 제스처 플래그가 없다"로만 제시 | 플래그 부재는 선언 수준의 근거일 뿐이다. **실제 조작 API 호출이 없다는 것**을 코드에서 확인한 결과로 바꿔 제시한다(§3-7). CI 가 이를 강제한다 |
 
 ## 2. 조사 범위
 
@@ -57,8 +69,11 @@ debug APK 의 `uses-permission` 은 **2줄**이다.
 `BIND_NOTIFICATION_LISTENER_SERVICE`, `MANAGE_EXTERNAL_STORAGE`,
 `READ_CONTACTS`.
 
-`INTERNET` 이 없다는 것은 중요하다. **이 앱은 읽은 값을 외부로 보낼 수
-없다.** 코드 약속이 아니라 플랫폼이 강제하는 사실이다.
+`INTERNET` 이 없다는 것은 **앱이 직접 네트워크 통신을 할 수 없다**는 뜻이다.
+플랫폼이 강제하는 제한이며 코드 약속이 아니다.
+
+이것을 "모든 외부 전달이 불가능하다" 로 넓혀 말하지 않는다. 간접 경로는
+따로 코드를 검토해 §3-6 에 적었고, **알림을 통한 노출 경로가 하나 있다.**
 
 ### 3-3. 접근성 서비스 선언 — merged manifest 실제 값
 
@@ -118,6 +133,67 @@ org.jetbrains.kotlinx:kotlinx-serialization-json  1.7.3
 org.jetbrains.kotlinx:kotlinx-coroutines-core  1.9.0
 ```
 
+### 3-6. 데이터가 앱 밖으로 나갈 수 있는 경로 — 코드 검토 결과
+
+`INTERNET` 권한 부재가 보장하는 것은 **직접 네트워크 통신 불가**다. 그 밖의
+경로를 코드에서 하나씩 확인했다(검색 대상: `app/src`, `observer/src` 전체).
+
+| 경로 | 결과 |
+|---|---|
+| 네트워크 API (`HttpURLConnection`, `openConnection`, OkHttp, Retrofit, `Socket`, `WebView`) | **없음** |
+| 파일 쓰기 (`FileOutputStream`, `getExternalFilesDir`, `writeText`) | **없음.** DataStore 가 앱 전용 저장소에만 쓴다 |
+| 클립보드 (`ClipboardManager`, `setPrimaryClip`) | **없음** |
+| 로그 출력 (`Log.*`, `println`, `printStackTrace`) | **없음** |
+| 공유 Intent (`ACTION_SEND`, `createChooser`, `EXTRA_TEXT`, `FileProvider`) | **없음** |
+| `ContentProvider` 노출 | **없음** |
+| 클라우드 백업 | `android:allowBackup="false"` |
+| `startActivity` | **3곳.** 모두 시스템 설정 화면으로 이동할 뿐이며 관찰 데이터를 담지 않는다 — `Settings.ACTION_ACCESSIBILITY_SETTINGS` 2곳, `Settings.ACTION_APPLICATION_DETAILS_SETTINGS` 1곳(자기 앱 패키지 URI만 전달) |
+
+**찾은 노출 경로 하나 — 시스템 알림.**
+
+`MainViewModel.applyObservation()` 이 읽기 성공 시 알림을 띄우고, 그 본문에
+관찰 결과가 들어간다.
+
+```kotlin
+"${train.trainLabel} ${train.departAt ?: "시각 불명"} · 일반실 ${label(...)} · 특실 ${label(...)}"
+```
+
+따라서 다음 경우에 관찰 내용이 앱 밖에서 보일 수 있다.
+
+- 잠금화면·알림 그늘에 표시된다.
+- 사용자가 **별도로** 알림 접근 권한(`BIND_NOTIFICATION_LISTENER_SERVICE`)을
+  준 다른 앱이 그 본문을 읽을 수 있다. 그 권한은 이 앱이 아니라 그 앱이
+  갖는 것이며, 사용자가 직접 허용해야 한다.
+
+알림 본문에 자격증명·세션·화면 원문은 들어가지 않는다. 열차번호·시각·좌석
+표시만 들어간다. 그래도 **"모든 외부 전달이 불가능하다"고는 말할 수 없다.**
+
+### 3-7. 읽기 전용의 실제 근거 — 조작 API 호출 부재
+
+선언 플래그 부재(§3-3)는 근거의 절반이다. 나머지 절반은 **코드가 조작 API 를
+호출하지 않는다**는 것이다. 주석과 문자열 리터럴을 지운 뒤 검사한 결과,
+아래 호출이 `app/src`·`observer/src` 전체에 **하나도 없다.**
+
+```
+performAction, performGlobalAction, dispatchGesture, takeScreenshot,
+setServiceInfo, GLOBAL_ACTION_*, ACTION_CLICK, ACTION_SET_TEXT,
+ACTION_SCROLL_FORWARD, ACTION_SCROLL_BACKWARD
+```
+
+(`RailObserverService.kt` 의 주석에 이 이름들이 적혀 있으나 호출이 아니다.
+검사는 주석을 제거한 뒤 수행한다.)
+
+서비스가 `AccessibilityNodeInfo` 에서 실제로 쓰는 멤버는 읽기 전용 7개뿐이다.
+
+```
+childCount, getChild(), text, contentDescription, className,
+isPassword, isEditable, recycle()
+```
+
+이 사실은 CI 의 **읽기 전용 강제 검사** 단계가 매 빌드마다 확인한다. 조작
+API 나 네트워크 API 가 들어오면 빌드가 실패한다. 문서의 약속이 아니라
+빌드 게이트다.
+
 ## 4. 공식 문서와의 대조 — 사실 / 해석 / 추정
 
 ### 4-1. 확인된 사실 (이번에 원문을 직접 읽음)
@@ -130,18 +206,34 @@ org.jetbrains.kotlinx:kotlinx-coroutines-core  1.9.0
 | `.../privacy-and-security/risks/test-debug` | 디버그 기능이 남은 빌드를 배포하면 보안 수준이 떨어진다 |
 | `developer.android.com/developer-verification` | 개발자 검증 보호는 **2026-09-30** 브라질·인도네시아·싱가포르·태국의 참여 스토어부터, **2027년** 전 세계로 확대. Play Console 이 패키지명을 등록. 학생·교사·취미 개발자를 위한 **제한 배포 계정**은 신원증명·등록비 없이 최대 20대 기기에 공유 가능 |
 
-### 4-2. 원문을 확인하지 못한 것
+### 4-2. 공식 원문 — 주소와 열람 상태
 
-**Google Play 프로텍트의 이 차단 유형을 설명하는 공식 페이지를 읽지
-못했다.** 해당 문서는 `support.google.com`, `play.google.com`,
-`developers.google.com` 에 있고 이 개발 환경의 네트워크 정책이 세 호스트
-모두를 차단한다(프록시가 CONNECT 에 403). 따라서 아래는 확인할 수 없었다.
+이 차단 유형과 이의신청의 **공식 원문 주소**는 다음 두 곳이다.
 
-- 차단 규칙의 정확한 문구와 트리거 목록
-- 이의신청 양식의 정확한 주소와 처리 절차
+| 용도 | 주소 |
+|---|---|
+| 차단 유형 개발자 안내 | `https://developers.google.com/android/play-protect/warning-dev-guidance` |
+| 이의신청 | `https://support.google.com/googleplay/android-developer/contact/protectappeals` |
+
+**열람 상태를 주체별로 구분한다.**
+
+| 주체 | 상태 |
+|---|---|
+| 사용자(정과장님) 환경 | **열람 확인됨** |
+| 이 작업 환경(Claude) | **열지 못했다.** 두 주소 모두 프록시가 CONNECT 에 403 으로 응답한다(`developers.google.com`, `support.google.com` 차단) |
+
+따라서 **나는 이 두 문서의 원문을 읽지 않았다.** 아래 항목은 원문을
+대조하지 못한 상태로 남는다.
+
+- 차단 유형의 정확한 분류명과 판정 기준
+- 개발자가 취할 수 있는 조치로 Google 이 **명시한** 항목
+- 이의신청 양식이 요구하는 필수 입력 항목과 처리 기간
 - 차단 화면이 "무시하고 설치" 를 제공하는 조건
 
-이 항목들은 정과장님이 Windows PC 에서 직접 열어 확인하실 수 있다.
+정과장님이 두 문서를 열어 **개발자 조치 항목과 이의신청 필수 입력란**을
+알려 주시면, 그 내용에 맞춰 `PLAY-SUBMISSION-MATERIALS.md` 의 문안을
+고치겠다. 지금 문안은 원문 요구사항에 맞춘 것이 아니라 **이 앱의 사실
+관계를 정리한 것**이다.
 
 ### 4-3. 해석 (사실에서 바로 따라오는 것)
 
@@ -179,18 +271,34 @@ SMS·알림 읽기·화면 오버레이·화면 캡처·파일 접근 권한이 
 | debuggable 이 아닌 **release 빌드 타입** 추가 | `.../risks/android-debuggable` | 배포·검토용 빌드가 debuggable 이 아니다(§3-1 에서 확인) |
 | release 서명을 Secret 으로 분리 | — | 키스토어를 저장소·artifact 에 두지 않는다 |
 
-### 알려드리는 부작용
+### `isAccessibilityTool="false"` 명시가 바꾸는 것과 바꾸지 않는 것
 
-`isAccessibilityTool="false"` 로 선언하면, 대상 앱이 `accessibilityDataSensitive`
-를 `yes` 로 표시한 뷰는 **읽을 수 없게 된다**(R.attr, API 34). 공식 앱이
-좌석 표시를 그렇게 표시해 두었다면 그 화면은 읽기 불가가 된다. 그래도
-거짓 선언보다 이쪽이 맞다. 읽기 불가로 나오면 그대로 보고한다.
+**런타임 동작을 바꾸지 않는다.** 이 속성의 기본값이 이미 `false` 이므로
+(R.attr, API 31), 차단된 `f19f554` 도 `false` 로 동작하고 있었다.
+
+| | 바뀌었나 |
+|---|---|
+| 접근성 서비스가 읽을 수 있는 범위 | **안 바뀜.** `accessibilityDataSensitive="yes"` 뷰를 읽을 수 없는 제한은 전부터 있었다 |
+| 시스템의 개인정보 고지 알림 | **안 바뀜.** `false` 일 때 띄우는 동작이 전부터 적용됐다 |
+| manifest 에 드러나는 선언 | **바뀜.** 속성이 APK 에 명시적으로 들어간다 |
+
+즉 이 수정의 효과는 **정직성과 검토 가능성**이다. 검토자가 APK 를 열면
+`isAccessibilityTool=false` 를 바로 볼 수 있고, 우리가 장애인 지원 도구라고
+주장하지 않는다는 것이 기록된다. 동작 개선이나 새 제한이 아니다.
+
+`flagReportViewIds` 제거는 **실제로 요청 범위를 줄인다.** 서비스가 뷰 ID 를
+쓰지 않는데 요청하고 있었다.
 
 ### 코드 수정으로 해결됐는지
 
-**모른다.** 추정 3 그대로다. 그리고 지금은 **검증할 수도 없다** — release
-APK 가 서명되지 않아 설치할 수 없기 때문이다. 다음 단계는
-`android/docs/PLAY-SUBMISSION-MATERIALS.md` 에 있다.
+**모른다.** 추정 3 그대로다. 설치 결과를 받기 전에는 차단 해결이라고
+보고하지 않는다.
+
+검증하려면 **서명된 release APK** 가 필요하다. 서명 Secret 이 등록되기
+전까지 release APK 는 서명되지 않으며, 설치할 수 없다. CI 는 그 경우
+파일명에 `-UNSIGNED-DO-NOT-INSTALL` 을 붙여 설치용으로 오인되지 않게 한다.
+
+절차는 `android/docs/PLAY-SUBMISSION-MATERIALS.md` 에 있다.
 
 ## 6. 쓰지 않는 해결책
 
