@@ -1,0 +1,8 @@
+# Gradle·Android 빌드 산출물
+.gradle/
+build/
+local.properties
+*.apk
+*.aab
+captures/
+.cxx/

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- android/DESIGN-TOKENS.md 와 같은 값이다. -->
+    <color name="railflow_background">#070707</color>
+    <color name="railflow_nav_bar">#0D0D0D</color>
+    <color name="railflow_primary">#FF8A1F</color>
+</resources>

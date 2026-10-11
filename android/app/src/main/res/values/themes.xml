@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 웹과 같은 어두운 바탕(#070707). Compose 가 실제 색을 칠한다. -->
+    <style name="Theme.RailFlow" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@color/railflow_nav_bar</item>
+        <item name="android:navigationBarColor">@color/railflow_nav_bar</item>
+        <item name="android:windowBackground">@color/railflow_background</item>
+    </style>
+</resources>
